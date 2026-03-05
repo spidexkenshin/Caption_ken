@@ -1,8 +1,35 @@
+import os
 import re
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from motor.motor_asyncio import AsyncIOMotorClient
-from config import *
+
+# ---------------- ENV LOAD SAFELY ---------------- #
+
+API_ID = os.getenv("API_ID")
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+MONGO_URI = os.getenv("MONGO_URI")
+ADMIN_IDS = os.getenv("ADMIN_IDS")
+
+if not API_ID or not API_HASH or not BOT_TOKEN or not MONGO_URI or not ADMIN_IDS:
+    raise ValueError("❌ One or more environment variables are missing!")
+
+API_ID = int(API_ID)
+ADMIN_IDS = list(map(int, ADMIN_IDS.split(",")))
+
+# ---------------- DEFAULT CAPTION ---------------- #
+
+DEFAULT_CAPTION = """<b><blockquote> ✨ {anime} ✨</blockquote>
+‣ Episode : {ep}
+‣ Season : {season}
+‣ Quality : {quality}
+‣ Audio : {audio} | Official🎙️
+━━━━━━━━━━━━━━━━━━━━━━
+<blockquote>🚀 For More Join: [@KENSHIN_ANIME & MANWHA_VERSE]</blockquote>
+━━━━━━━━━━━━━━━━━━━━━━</b>"""
+
+# ---------------- APP INIT ---------------- #
 
 app = Client(
     "caption-bot",
@@ -16,7 +43,7 @@ db = mongo["caption_bot"]
 users = db["users"]
 admins_db = db["admins"]
 
-# ------------------ ADMIN CHECK ------------------ #
+# ---------------- ADMIN CHECK ---------------- #
 
 async def is_admin(user_id):
     if user_id in ADMIN_IDS:
@@ -24,7 +51,7 @@ async def is_admin(user_id):
     admin = await admins_db.find_one({"user_id": user_id})
     return bool(admin)
 
-# ------------------ START ------------------ #
+# ---------------- START ---------------- #
 
 @app.on_message(filters.command("start"))
 async def start(client, message):
@@ -32,20 +59,7 @@ async def start(client, message):
         return await message.reply_text("❌ Only Admin Can Use This Bot")
     await message.reply_text("🔥 Caption Changer Bot Ready!")
 
-# ------------------ HELP ------------------ #
-
-@app.on_message(filters.command("help"))
-async def help_cmd(client, message):
-    if not await is_admin(message.from_user.id):
-        return
-    await message.reply_text("""
-/setcaption - Set custom caption
-/addadmin ID
-/deladmin ID
-/admins - List admins
-""")
-
-# ------------------ SET CAPTION ------------------ #
+# ---------------- SET CAPTION ---------------- #
 
 @app.on_message(filters.command("setcaption"))
 async def set_caption(client, message):
@@ -64,50 +78,7 @@ async def set_caption(client, message):
 
     await message.reply_text("✅ Custom Caption Saved!")
 
-# ------------------ ADD ADMIN ------------------ #
-
-@app.on_message(filters.command("addadmin"))
-async def add_admin(client, message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-
-    try:
-        user_id = int(message.command[1])
-        await admins_db.insert_one({"user_id": user_id})
-        await message.reply_text("✅ Admin Added")
-    except:
-        await message.reply_text("Usage: /addadmin user_id")
-
-# ------------------ DELETE ADMIN ------------------ #
-
-@app.on_message(filters.command("deladmin"))
-async def del_admin(client, message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-
-    try:
-        user_id = int(message.command[1])
-        await admins_db.delete_one({"user_id": user_id})
-        await message.reply_text("❌ Admin Removed")
-    except:
-        await message.reply_text("Usage: /deladmin user_id")
-
-# ------------------ LIST ADMINS ------------------ #
-
-@app.on_message(filters.command("admins"))
-async def list_admins(client, message):
-    if not await is_admin(message.from_user.id):
-        return
-
-    text = "👑 Admin List:\n"
-    text += "\n".join([str(i) for i in ADMIN_IDS])
-
-    async for admin in admins_db.find():
-        text += f"\n{admin['user_id']}"
-
-    await message.reply_text(text)
-
-# ------------------ VIDEO HANDLER ------------------ #
+# ---------------- VIDEO HANDLER ---------------- #
 
 @app.on_message(filters.video)
 async def change_caption(client, message: Message):
@@ -119,7 +90,6 @@ async def change_caption(client, message: Message):
 
     original_caption = message.caption or ""
 
-    # Regex Extract
     anime = re.search(r"Anime[:\s]+(.+)", original_caption, re.IGNORECASE)
     ep = re.search(r"Episode[:\s]+(\d+)", original_caption, re.IGNORECASE)
     season = re.search(r"Season[:\s]+(\d+)", original_caption, re.IGNORECASE)
