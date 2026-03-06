@@ -17,7 +17,7 @@ app = Client("KenshinBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN
 video_queue = []
 is_processing = False
 target_sticker = None
-target_cover = None # Thumbnail storage
+target_cover = None 
 
 CAPTION_TEMPLATE = """<b><blockquote>💫 {anime_name} 💫</blockquote>
 ‣ Episode : {ep}
@@ -28,14 +28,6 @@ CAPTION_TEMPLATE = """<b><blockquote>💫 {anime_name} 💫</blockquote>
 <blockquote>🚀 For More Join
 🔰 [@KENSHIN_ANIME]</blockquote>
 ━━━━━━━━━━━━━━━━━━━━━</b>"""
-
-HELP_TEXT = """🚀 <b>Detailed Guide for Admin:</b>
-
-1. <b>Start:</b> /start se check karein bot on hai.
-2. <b>Set Sticker:</b> Kisi sticker ko reply karke <code>/set_sticker</code> likhein. Ye har episode ke baad aayega.
-3. <b>Set Cover:</b> Kisi photo ko reply karke <code>/set_cover</code> likhein. Ye har video ka thumbnail ban jayega.
-4. <b>Processing:</b> Bas videos forward karein, bot auto-sort, rename, aur clean-up kar dega.
-"""
 
 def get_quality_rank(q_str):
     ranks = {"480p": 1, "720p": 2, "1080p": 3, "4k": 4, "2160p": 5}
@@ -49,40 +41,38 @@ async def start_cmd(client, message: Message):
 
 @app.on_message(filters.command("help") & filters.private & filters.user(ADMIN_ID))
 async def help_cmd(client, message: Message):
-    await message.reply(HELP_TEXT)
+    help_text = "🚀 <b>Guide:</b>\n\n1. `/set_sticker`: Sticker ko reply karein.\n2. `/set_cover`: Photo ko reply karein (Thumbnail badalne ke liye).\n3. Videos forward karein, bot auto-process karega."
+    await message.reply(help_text)
 
 @app.on_message(filters.command("set_sticker") & filters.reply & filters.user(ADMIN_ID))
 async def set_sticker_cmd(client, message: Message):
     global target_sticker
     if message.reply_to_message.sticker:
         target_sticker = message.reply_to_message.sticker.file_id
-        await message.reply("✅ <b>Sticker Set! Ab har Ep ke baad maze lega.</b>")
+        await message.reply("✅ <b>Sticker set ho gaya!</b>")
     else:
-        await message.reply("❌ Bhai Sticker ko reply karo.")
+        await message.reply("❌ Sticker ko reply karo.")
 
 @app.on_message(filters.command("set_cover") & filters.reply & filters.user(ADMIN_ID))
 async def set_cover_cmd(client, message: Message):
     global target_cover
     if message.reply_to_message.photo:
-        # Download photo for thumbnail (only once)
+        # Download cover only once to use it as thumbnail
         target_cover = await client.download_media(message.reply_to_message.photo)
-        await message.reply("🖼 <b>Cover Set! Ab har video professional dikhegi.</b>")
+        await message.reply("🖼 <b>Cover set ho gaya! Ab har video par ye dikhega.</b>")
     else:
-        await message.reply("❌ Bhai Photo ko reply karo.")
+        await message.reply("❌ Photo ko reply karo.")
 
-# --- Fast Processing Logic ---
+# --- Video Cover Changer Logic ---
 
 async def process_queue(client, chat_id):
     global is_processing, video_queue, target_sticker, target_cover
     is_processing = True
     
     video_queue.sort(key=lambda x: (x['ep_num'], x['q_rank']))
-    status_msg = await client.send_message(chat_id, "⚡ <b>Speed mode active... Processing!</b>")
+    status_msg = await client.send_message(chat_id, "⚡ <b>Processing with New Cover...</b>")
 
     last_ep = None
-    if video_queue:
-        last_ep = video_queue[0]['ep_num']
-
     for item in video_queue:
         msg = item['message']
         
@@ -93,22 +83,20 @@ async def process_queue(client, chat_id):
             last_ep = item['ep_num']
 
         try:
-            # File ID for instant copy
+            # File ID use karke instant send (No Rename for Speed)
             f_id = msg.video.file_id if msg.video else msg.document.file_id
             
-            # Send Video (Rename + Cover + Caption)
             await client.send_video(
                 chat_id=chat_id,
                 video=f_id,
                 caption=item['caption'],
-                file_name="For more join: [@KENSHIN_ANIME].mp4", # Fixed Rename
-                thumb=target_cover, # Custom Cover
+                thumb=target_cover, # Ye hai main cover changer feature
                 parse_mode=ParseMode.HTML,
                 supports_streaming=True
             )
             
-            await msg.delete()
-            await asyncio.sleep(0.8) # Ultra Fast delay
+            await msg.delete() # Original delete
+            await asyncio.sleep(1) 
             
         except Exception as e:
             print(f"Error: {e}")
@@ -116,7 +104,7 @@ async def process_queue(client, chat_id):
     if target_sticker:
         await client.send_sticker(chat_id, target_sticker)
 
-    await status_msg.edit("✅ <b>All done! Fast and Clean.</b>")
+    await status_msg.edit("✅ <b>Sari videos ka cover change aur sorting ho gaya!</b>")
     video_queue = []
     is_processing = False
 
@@ -124,7 +112,6 @@ async def process_queue(client, chat_id):
 async def collector(client, message: Message):
     original_caption = message.caption or ""
     
-    # Fast Extraction
     ep_match = re.search(r"(?i)(?:Episode|Ep)[\s\-:]*(\d+)", original_caption)
     ep_num = int(ep_match.group(1)) if ep_match else 0
     
@@ -146,7 +133,7 @@ async def collector(client, message: Message):
     })
 
     if not is_processing:
-        await asyncio.sleep(3) # Collecting time
+        await asyncio.sleep(4) 
         if not is_processing:
             await process_queue(client, message.chat.id)
 
