@@ -1,117 +1,147 @@
-import os
+import json
 import re
 from pyrogram import Client, filters
-from pyrogram.types import Message
-from motor.motor_asyncio import AsyncIOMotorClient
-
-# ---------------- ENV LOAD SAFELY ---------------- #
-
-API_ID = os.getenv("API_ID")
-API_HASH = os.getenv("API_HASH")
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-MONGO_URI = os.getenv("MONGO_URI")
-ADMIN_IDS = os.getenv("ADMIN_IDS")
-
-if not API_ID or not API_HASH or not BOT_TOKEN or not MONGO_URI or not ADMIN_IDS:
-    raise ValueError("❌ One or more environment variables are missing!")
-
-API_ID = int(API_ID)
-ADMIN_IDS = list(map(int, ADMIN_IDS.split(",")))
-
-# ---------------- DEFAULT CAPTION ---------------- #
-
-DEFAULT_CAPTION = """<b><blockquote> ✨ {anime} ✨</blockquote>
-‣ Episode : {ep}
-‣ Season : {season}
-‣ Quality : {quality}
-‣ Audio : {audio} | Official🎙️
-━━━━━━━━━━━━━━━━━━━━━━
-<blockquote>🚀 For More Join: [@KENSHIN_ANIME & MANWHA_VERSE]</blockquote>
-━━━━━━━━━━━━━━━━━━━━━━</b>"""
-
-# ---------------- APP INIT ---------------- #
+from config import *
 
 app = Client(
-    "caption-bot",
+    "captionbot",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN
 )
 
-mongo = AsyncIOMotorClient(MONGO_URI)
-db = mongo["caption_bot"]
-users = db["users"]
-admins_db = db["admins"]
+DB_FILE = "db.json"
 
-# ---------------- ADMIN CHECK ---------------- #
+DEFAULT_CAPTION = """<b><blockquote>💫 {anime_name} 💫</blockquote>
+‣ Episode : {ep}
+‣ Season : {season}
+‣ Quality : {quality}
+‣ Audio : Hindi Dub 🎙️ | Official
+━━━━━━━━━━━━━━━━━━━━━
+<blockquote>🚀 For More Join
+🔰 [@KENSHIN_ANIME]</blockquote>
+━━━━━━━━━━━━━━━━━━━━━</b>"""
 
-async def is_admin(user_id):
-    if user_id in ADMIN_IDS:
-        return True
-    admin = await admins_db.find_one({"user_id": user_id})
-    return bool(admin)
 
-# ---------------- START ---------------- #
+def load_db():
+    with open(DB_FILE) as f:
+        return json.load(f)
 
-@app.on_message(filters.command("start"))
-async def start(client, message):
-    if not await is_admin(message.from_user.id):
-        return await message.reply_text("❌ Only Admin Can Use This Bot")
-    await message.reply_text("🔥 Caption Changer Bot Ready!")
 
-# ---------------- SET CAPTION ---------------- #
+def save_db(data):
+    with open(DB_FILE, "w") as f:
+        json.dump(data, f, indent=4)
 
-@app.on_message(filters.command("setcaption"))
-async def set_caption(client, message):
-    if not await is_admin(message.from_user.id):
+
+def extract(text):
+
+    ep = re.search(r'episode\s*[-:]?\s*(\d+)', text, re.I)
+    season = re.search(r'season\s*[-:]?\s*(\d+)', text, re.I)
+    quality = re.search(r'(480p|720p|1080p|2160p|4k)', text, re.I)
+
+    ep = int(ep.group(1)) if ep else 1
+    season = int(season.group(1)) if season else 1
+    quality = quality.group(1) if quality else "720p"
+
+    ep = f"{ep:02}"
+    season = f"{season:02}"
+
+    return ep, season, quality
+
+
+@app.on_message(filters.command("help"))
+async def help(client, message):
+
+    if message.from_user.id not in ADMINS:
         return
 
-    text = message.text.split(None, 1)
-    if len(text) < 2:
-        return await message.reply_text("Send caption after command")
+    await message.reply_text("""
+Commands
 
-    await users.update_one(
-        {"user_id": message.from_user.id},
-        {"$set": {"caption": text[1]}},
-        upsert=True
-    )
+/setcaption
+/delcaption
+/setcover
+/help
 
-    await message.reply_text("✅ Custom Caption Saved!")
+Send video to auto rename caption
+""")
 
-# ---------------- VIDEO HANDLER ---------------- #
 
+# SET CAPTION
+@app.on_message(filters.command("setcaption") & filters.reply)
+async def setcaption(client, message):
+
+    if message.from_user.id not in ADMINS:
+        return
+
+    db = load_db()
+
+    db["caption"] = message.reply_to_message.text
+
+    save_db(db)
+
+    await message.reply("✅ Caption Updated")
+
+
+# DELETE CAPTION
+@app.on_message(filters.command("delcaption"))
+async def delcaption(client, message):
+
+    if message.from_user.id not in ADMINS:
+        return
+
+    db = load_db()
+
+    db["caption"] = ""
+
+    save_db(db)
+
+    await message.reply("❌ Caption Deleted")
+
+
+# SET COVER
+@app.on_message(filters.command("setcover") & filters.reply)
+async def setcover(client, message):
+
+    if message.from_user.id not in ADMINS:
+        return
+
+    db = load_db()
+
+    db["cover"] = message.reply_to_message.photo.file_id
+
+    save_db(db)
+
+    await message.reply("✅ Cover Saved")
+
+
+# VIDEO HANDLER
 @app.on_message(filters.video)
-async def change_caption(client, message: Message):
-    if not await is_admin(message.from_user.id):
+async def rename(client, message):
+
+    if message.from_user.id not in ADMINS:
         return
 
-    user = await users.find_one({"user_id": message.from_user.id})
-    caption_template = user["caption"] if user else DEFAULT_CAPTION
+    db = load_db()
 
-    original_caption = message.caption or ""
+    old_caption = message.caption or ""
 
-    anime = re.search(r"Anime[:\s]+(.+)", original_caption, re.IGNORECASE)
-    ep = re.search(r"Episode[:\s]+(\d+)", original_caption, re.IGNORECASE)
-    season = re.search(r"Season[:\s]+(\d+)", original_caption, re.IGNORECASE)
-    quality = re.search(r"Quality[:\s]+(\S+)", original_caption, re.IGNORECASE)
-    audio = re.search(r"Audio[:\s]+(.+)", original_caption, re.IGNORECASE)
+    ep, season, quality = extract(old_caption)
 
-    data = {
-        "anime": anime.group(1) if anime else "Unknown",
-        "ep": ep.group(1) if ep else "00",
-        "season": season.group(1) if season else "01",
-        "quality": quality.group(1) if quality else "1080p",
-        "audio": audio.group(1) if audio else "Hindi"
-    }
+    template = db["caption"] if db["caption"] else DEFAULT_CAPTION
 
-    new_caption = caption_template.format(**data)
-
-    await client.copy_message(
-        chat_id=message.chat.id,
-        from_chat_id=message.chat.id,
-        message_id=message.id,
-        caption=new_caption,
-        parse_mode="html"
+    new_caption = template.format(
+        anime_name="Unknown Anime",
+        ep=ep,
+        season=season,
+        quality=quality
     )
 
+    await message.copy(
+        chat_id=message.chat.id,
+        caption=new_caption
+    )
+
+
+print("Bot Running...")
 app.run()
