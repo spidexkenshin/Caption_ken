@@ -12,18 +12,18 @@ app = Client(
 
 DB_FILE = "db.json"
 
-DEFAULT_CAPTION = """<b><blockquote>💫 {anime_name} 💫</blockquote>
+DEFAULT_CAPTION = """<b><blockquote>💫 {anime} 💫</blockquote>
 ‣ Episode : {ep}
 ‣ Season : {season}
 ‣ Quality : {quality}
-‣ Audio : Hindi Dub 🎙️ | Official
+‣ Audio : {audio}
 ━━━━━━━━━━━━━━━━━━━━━
 <blockquote>🚀 For More Join
 🔰 [@KENSHIN_ANIME]</blockquote>
 ━━━━━━━━━━━━━━━━━━━━━</b>"""
 
 
-# ---------------- DATABASE ----------------
+# ---------- DATABASE ----------
 
 def load_db():
     try:
@@ -38,42 +38,31 @@ def save_db(data):
         json.dump(data, f, indent=4)
 
 
-# ---------------- EXTRACT INFO ----------------
+# ---------- EXTRACT DATA ----------
 
-def extract(text):
+def extract_data(text):
 
-    ep = re.search(r'(?:episode|ep)[^\d]*(\d+)', text, re.I)
-    season = re.search(r'(?:season|s)[^\d]*(\d+)', text, re.I)
-    quality = re.search(r'(480p|720p|1080p|2160p|4k)', text, re.I)
+    anime = re.search(r'Anime:\s*(.*)', text, re.I)
+    season = re.search(r'Season:\s*(\d+)', text, re.I)
+    episode = re.search(r'Episode:\s*(\d+)', text, re.I)
+    quality = re.search(r'Quality:\s*(\S+)', text, re.I)
+    audio = re.search(r'Audio:\s*(.*)', text, re.I)
 
-    ep = int(ep.group(1)) if ep else 1
+    anime = anime.group(1).strip() if anime else "Unknown Anime"
+
     season = int(season.group(1)) if season else 1
-    quality = quality.group(1) if quality else "720p"
+    episode = int(episode.group(1)) if episode else 1
 
-    ep = f"{ep:02}"
+    quality = quality.group(1) if quality else "1080p"
+    audio = audio.group(1).strip() if audio else "Hindi"
+
     season = f"{season:02}"
+    episode = f"{episode:02}"
 
-    return ep, season, quality
+    return anime, season, episode, quality, audio
 
 
-# ---------------- ANIME NAME ----------------
-
-def get_anime_name(text):
-
-    lines = text.split("\n")
-
-    for line in lines:
-
-        if "anime" in line.lower():
-
-            name = line.split(":")[-1].strip()
-
-            if name:
-                return name
-
-    return "Unknown Anime"
-
-# ---------------- START ----------------
+# ---------- START ----------
 
 @app.on_message(filters.command("start"))
 async def start(client, message):
@@ -82,11 +71,11 @@ async def start(client, message):
         return
 
     await message.reply_text(
-        "<b><blockquote>Jinda hu be abhi... </blockquote></b>"
+        "<b><blockquote>Jinda hu abhi... </blockquote></b>"
     )
 
 
-# ---------------- HELP ----------------
+# ---------- HELP ----------
 
 @app.on_message(filters.command("help"))
 async def help_cmd(client, message):
@@ -95,7 +84,7 @@ async def help_cmd(client, message):
         return
 
     await message.reply_text(
-        """
+"""
 Commands
 
 /setcaption (reply)
@@ -104,16 +93,13 @@ Set custom caption
 /delcaption
 Delete caption
 
-/setcover (reply photo)
-Set cover image
-
 /help
 Show commands
 """
-    )
+)
 
 
-# ---------------- SET CAPTION ----------------
+# ---------- SET CAPTION ----------
 
 @app.on_message(filters.command("setcaption") & filters.reply)
 async def setcaption(client, message):
@@ -130,7 +116,7 @@ async def setcaption(client, message):
     await message.reply("✅ Caption Updated")
 
 
-# ---------------- DELETE CAPTION ----------------
+# ---------- DELETE CAPTION ----------
 
 @app.on_message(filters.command("delcaption"))
 async def delcaption(client, message):
@@ -147,27 +133,10 @@ async def delcaption(client, message):
     await message.reply("❌ Caption Deleted")
 
 
-# ---------------- SET COVER ----------------
-
-@app.on_message(filters.command("setcover") & filters.reply)
-async def setcover(client, message):
-
-    if message.from_user.id not in ADMINS:
-        return
-
-    db = load_db()
-
-    if message.reply_to_message.photo:
-        db["cover"] = message.reply_to_message.photo.file_id
-        save_db(db)
-
-        await message.reply("✅ Cover Saved")
-
-
-# ---------------- VIDEO HANDLER ----------------
+# ---------- VIDEO HANDLER ----------
 
 @app.on_message(filters.video)
-async def rename(client, message):
+async def rename_video(client, message):
 
     if message.from_user.id not in ADMINS:
         return
@@ -176,17 +145,16 @@ async def rename(client, message):
 
     old_caption = message.caption or ""
 
-    ep, season, quality = extract(old_caption)
-
-    anime_name = get_anime_name(old_caption)
+    anime, season, ep, quality, audio = extract_data(old_caption)
 
     template = db["caption"] if db["caption"] else DEFAULT_CAPTION
 
     new_caption = template.format(
-        anime_name=anime_name,
-        ep=ep,
+        anime=anime,
         season=season,
-        quality=quality
+        ep=ep,
+        quality=quality,
+        audio=audio
     )
 
     await message.copy(
