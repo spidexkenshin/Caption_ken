@@ -60,13 +60,18 @@ def extract(text):
 
 def get_anime_name(text):
 
-    anime = re.search(r'(?:anime|title)[^\n:]*[:\-]\s*(.*)', text, re.I)
+    lines = text.split("\n")
 
-    if anime:
-        return anime.group(1).strip()
+    for line in lines:
+
+        if "anime" in line.lower():
+
+            name = line.split(":")[-1].strip()
+
+            if name:
+                return name
 
     return "Unknown Anime"
-
 
 # ---------------- START ----------------
 
@@ -77,7 +82,7 @@ async def start(client, message):
         return
 
     await message.reply_text(
-        "<b><blockquote>Jinda hu abhi... </blockquote></b>"
+        "<b><blockquote>Jinda hu be abhi... </blockquote></b>"
     )
 
 
