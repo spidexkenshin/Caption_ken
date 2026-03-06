@@ -1,94 +1,83 @@
+import os
 import re
 from pyrogram import Client, filters
-from config import *
+from pyrogram.types import Message
+from pyrogram.enums import ParseMode
 
-app = Client(
-    "captionbot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN
-)
+# Environment Variables se data nikalna
+API_ID = int(os.environ.get("API_ID", 0))
+API_HASH = os.environ.get("API_HASH", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 
-DEFAULT_CAPTION = """<b><blockquote>💫 {anime} 💫</blockquote>
+# Pyrogram Client Setup
+app = Client("CaptionBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+
+# Tumhara Default Caption Template
+DEFAULT_CAPTION = """<b><blockquote>💫 {anime_name} 💫</blockquote>
 ‣ Episode : {ep}
 ‣ Season : {season}
 ‣ Quality : {quality}
-‣ Audio : {audio}
+‣ Audio : Hindi Dub 🎙️ | Official
 ━━━━━━━━━━━━━━━━━━━━━
 <blockquote>🚀 For More Join
 🔰 [@KENSHIN_ANIME]</blockquote>
 ━━━━━━━━━━━━━━━━━━━━━</b>"""
 
+@app.on_message(filters.command("start") & filters.private)
+async def start_cmd(client, message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    await message.reply("<b><blockquote> Jinda hu abhi.. </blockquote></b>", parse_mode=ParseMode.HTML)
 
-# -------- EXTRACT DATA FROM CAPTION --------
+@app.on_message(filters.command("help") & filters.private)
+async def help_cmd(client, message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    help_text = "Bhai, bas apni video yaha send/forward kar. Mai automatically purane caption se data nikal kar naya format laga dunga."
+    await message.reply(help_text)
 
-def extract_data(text):
+@app.on_message((filters.video | filters.document) & filters.private)
+async def change_caption(client, message: Message):
+    # Sirf Admin allow hai
+    if message.from_user.id != ADMIN_ID:
+        return
 
-    anime = re.search(r'Anime:\s*(.*)', text, re.I)
-    season = re.search(r'Season:\s*(\d+)', text, re.I)
-    episode = re.search(r'Episode:\s*(\d+)', text, re.I)
-    quality = re.search(r'(480p|720p|1080p|2160p|4k)', text, re.I)
-    audio = re.search(r'Audio:\s*(.*)', text, re.I)
+    original_caption = message.caption or message.text or ""
+    
+    # 1. Episode Extract karna (e.g. Episode - 24 ya Episode: 07)
+    ep_match = re.search(r"(?i)(?:Episode|Ep)[\s\-:]*(\d+)", original_caption)
+    ep = ep_match.group(1) if ep_match else "Unknown"
 
-    anime = anime.group(1).strip() if anime else "Unknown Anime"
-    season = int(season.group(1)) if season else 1
-    episode = int(episode.group(1)) if episode else 1
-    quality = quality.group(1) if quality else "1080p"
-    audio = audio.group(1).strip() if audio else "Hindi"
+    # 2. Season Extract karna (e.g. S01 ya Season: 01)
+    season_match = re.search(r"(?i)(?:Season|S)[\s\-:]*(\d+)", original_caption)
+    season = season_match.group(1) if season_match else "01"
 
-    season = f"{season:02}"
-    episode = f"{episode:02}"
+    # 3. Quality Extract karna (e.g. 1080p, 720p, 4k)
+    quality_match = re.search(r"(?i)(1080p|720p|480p|360p|4K|2160p)", original_caption)
+    quality = quality_match.group(1) if quality_match else "Unknown"
 
-    return anime, season, episode, quality, audio
+    # 4. Anime Name Extract karna (e.g. ᴀɴɪᴍᴇ: To Be Hero X)
+    anime_match = re.search(r"(?i)(?:ᴀɴɪᴍᴇ|Anime|Name)[\s\-:]*(.+)", original_caption)
+    if anime_match:
+        anime_name = anime_match.group(1).strip()
+    else:
+        # Agar purane caption me Anime name nahi hai (jaise tumhare 1st example me)
+        anime_name = "Unknown Anime"
 
-
-# -------- QUALITY SORT ORDER --------
-
-def quality_sort(q):
-
-    order = {
-        "480p": 1,
-        "720p": 2,
-        "1080p": 3,
-        "2160p": 4,
-        "4k": 4
-    }
-
-    return order.get(q.lower(), 5)
-
-
-# -------- START MESSAGE --------
-
-@app.on_message(filters.command("start"))
-async def start(client, message):
-
-    await message.reply_text(
-        "<b><blockquote>Jinda hu abhi... </blockquote></b>"
-    )
-
-
-# -------- VIDEO HANDLER --------
-
-@app.on_message(filters.video)
-async def rename_video(client, message):
-
-    old_caption = message.caption or ""
-
-    anime, season, ep, quality, audio = extract_data(old_caption)
-
+    # Naya caption format karna
     new_caption = DEFAULT_CAPTION.format(
-        anime=anime,
-        season=season,
+        anime_name=anime_name,
         ep=ep,
-        quality=quality,
-        audio=audio
+        season=season,
+        quality=quality
     )
 
+    # Video ko naye caption ke sath bhej do (Copy message is safe)
     await message.copy(
         chat_id=message.chat.id,
-        caption=new_caption
+        caption=new_caption,
+        parse_mode=ParseMode.HTML
     )
 
-
-print("Bot Running...")
 app.run()
