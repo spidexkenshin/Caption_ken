@@ -1,5 +1,5 @@
-import json
 import re
+import json
 from pyrogram import Client, filters
 from config import *
 
@@ -23,9 +23,14 @@ DEFAULT_CAPTION = """<b><blockquote>💫 {anime_name} 💫</blockquote>
 ━━━━━━━━━━━━━━━━━━━━━</b>"""
 
 
+# ---------------- DATABASE ----------------
+
 def load_db():
-    with open(DB_FILE) as f:
-        return json.load(f)
+    try:
+        with open(DB_FILE) as f:
+            return json.load(f)
+    except:
+        return {"caption": "", "cover": ""}
 
 
 def save_db(data):
@@ -33,10 +38,12 @@ def save_db(data):
         json.dump(data, f, indent=4)
 
 
+# ---------------- EXTRACT INFO ----------------
+
 def extract(text):
 
-    ep = re.search(r'episode\s*[-:]?\s*(\d+)', text, re.I)
-    season = re.search(r'season\s*[-:]?\s*(\d+)', text, re.I)
+    ep = re.search(r'(?:episode|ep)[^\d]*(\d+)', text, re.I)
+    season = re.search(r'(?:season|s)[^\d]*(\d+)', text, re.I)
     quality = re.search(r'(480p|720p|1080p|2160p|4k)', text, re.I)
 
     ep = int(ep.group(1)) if ep else 1
@@ -49,25 +56,60 @@ def extract(text):
     return ep, season, quality
 
 
-@app.on_message(filters.command("help"))
-async def help(client, message):
+# ---------------- ANIME NAME ----------------
+
+def get_anime_name(text):
+
+    anime = re.search(r'(?:anime|title)[^\n:]*[:\-]\s*(.*)', text, re.I)
+
+    if anime:
+        return anime.group(1).strip()
+
+    return "Unknown Anime"
+
+
+# ---------------- START ----------------
+
+@app.on_message(filters.command("start"))
+async def start(client, message):
 
     if message.from_user.id not in ADMINS:
         return
 
-    await message.reply_text("""
+    await message.reply_text(
+        "<b><blockquote>Jinda hu abhi... </blockquote></b>"
+    )
+
+
+# ---------------- HELP ----------------
+
+@app.on_message(filters.command("help"))
+async def help_cmd(client, message):
+
+    if message.from_user.id not in ADMINS:
+        return
+
+    await message.reply_text(
+        """
 Commands
 
-/setcaption
+/setcaption (reply)
+Set custom caption
+
 /delcaption
-/setcover
+Delete caption
+
+/setcover (reply photo)
+Set cover image
+
 /help
+Show commands
+"""
+    )
 
-Send video to auto rename caption
-""")
 
+# ---------------- SET CAPTION ----------------
 
-# SET CAPTION
 @app.on_message(filters.command("setcaption") & filters.reply)
 async def setcaption(client, message):
 
@@ -83,7 +125,8 @@ async def setcaption(client, message):
     await message.reply("✅ Caption Updated")
 
 
-# DELETE CAPTION
+# ---------------- DELETE CAPTION ----------------
+
 @app.on_message(filters.command("delcaption"))
 async def delcaption(client, message):
 
@@ -99,7 +142,8 @@ async def delcaption(client, message):
     await message.reply("❌ Caption Deleted")
 
 
-# SET COVER
+# ---------------- SET COVER ----------------
+
 @app.on_message(filters.command("setcover") & filters.reply)
 async def setcover(client, message):
 
@@ -108,14 +152,15 @@ async def setcover(client, message):
 
     db = load_db()
 
-    db["cover"] = message.reply_to_message.photo.file_id
+    if message.reply_to_message.photo:
+        db["cover"] = message.reply_to_message.photo.file_id
+        save_db(db)
 
-    save_db(db)
-
-    await message.reply("✅ Cover Saved")
+        await message.reply("✅ Cover Saved")
 
 
-# VIDEO HANDLER
+# ---------------- VIDEO HANDLER ----------------
+
 @app.on_message(filters.video)
 async def rename(client, message):
 
@@ -128,10 +173,12 @@ async def rename(client, message):
 
     ep, season, quality = extract(old_caption)
 
+    anime_name = get_anime_name(old_caption)
+
     template = db["caption"] if db["caption"] else DEFAULT_CAPTION
 
     new_caption = template.format(
-        anime_name="Unknown Anime",
+        anime_name=anime_name,
         ep=ep,
         season=season,
         quality=quality
