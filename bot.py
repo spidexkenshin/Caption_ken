@@ -11,14 +11,13 @@ API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 
-app = Client("KenshinSpeedBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, in_memory=True)
+app = Client("KenshinTurboBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, in_memory=True)
 
 # Global Storage
 video_queue = []
 is_processing = False
 target_sticker = None 
-
-CAPTION_TEMPLATE = """<b><blockquote>💫 {anime_name} 💫</blockquote>
+CUSTOM_CAPTION = """<b><blockquote>💫 {anime_name} 💫</blockquote>
 ‣ Episode : {ep}
 ‣ Season : {season}
 ‣ Quality : {quality}
@@ -43,105 +42,109 @@ async def set_sticker_cmd(client, message: Message):
     global target_sticker
     if message.reply_to_message.sticker:
         target_sticker = message.reply_to_message.sticker.file_id
-        await message.reply("✅ <b>Sticker Set! Ab har Ep ke baad yahi aayega.</b>")
+        await message.reply("✅ <b>Sticker Set!</b>")
+
+@app.on_message(filters.command("set_caption") & filters.user(ADMIN_ID))
+async def set_caption_cmd(client, message: Message):
+    global CUSTOM_CAPTION
+    if len(message.command) > 1:
+        CUSTOM_CAPTION = message.text.split(None, 1)[1]
+        await message.reply(f"✅ <b>Custom Caption Set!</b>\n\nPreview:\n{CUSTOM_CAPTION}")
     else:
-        await message.reply("❌ Sticker ko reply karo bhai.")
+        await message.reply("❌ <b>Format:</b> <code>/set_caption [aapka text]</code>\nPlaceholders: <code>{anime_name}, {ep}, {season}, {quality}</code>")
 
 @app.on_message(filters.command("cancel_queue") & filters.user(ADMIN_ID))
 async def cancel_queue_cmd(client, message: Message):
     global video_queue, is_processing
     video_queue = []
     is_processing = False
-    await message.reply("🛑 <b>Current Queue ko cancel kar diya gaya hai!</b>")
+    await message.reply("🛑 <b>Queue Cancelled!</b>")
 
-# --- Super Fast Processing Logic ---
+# --- Universal Extraction Logic ---
+
+def extract_data(caption):
+    # Season Detection (S01, Season 01, ( S01 ))
+    season_match = re.search(r"(?i)(?:Season|S)[\s\-:]*(\d+)", caption)
+    season = season_match.group(1).zfill(2) if season_match else "01"
+
+    # Episode Detection (Episode - 31, Ep 31, Ep:31)
+    ep_match = re.search(r"(?i)(?:Episode|Ep)[\s\-:]*(\d+)", caption)
+    ep_num = int(ep_match.group(1)) if ep_match else 0
+    ep_str = str(ep_num).zfill(2)
+
+    # Quality Detection
+    quality_match = re.search(r"(?i)(1080p|720p|480p|360p|4K|2160p)", caption)
+    quality = quality_match.group(1) if quality_match else "HD"
+
+    # Anime Name Detection
+    # Pehle check karega "Name:" ya "Anime:" ke aage, phir first line
+    name_match = re.search(r"(?i)(?:ᴀɴɪᴍᴇ|Anime|Name|📟)[\s\-:]*([^\n|(\-]+)", caption)
+    if name_match:
+        anime_name = name_match.group(1).strip()
+    else:
+        anime_name = caption.split('\n')[0].strip()[:30] # Backup: First line
+
+    return anime_name, ep_str, ep_num, season, quality
+
+# --- Turbo Processing ---
 
 async def process_queue(client, chat_id):
-    global is_processing, video_queue, target_sticker
+    global is_processing, video_queue, target_sticker, CUSTOM_CAPTION
     is_processing = True
-    
-    # Sorting: Episode wise and then Quality wise
     video_queue.sort(key=lambda x: (x['ep_num'], x['q_rank']))
     
-    status_msg = await client.send_message(chat_id, "⚡ <b>Speed Mode: Processing Started...</b>")
+    status_msg = await client.send_message(chat_id, "🚀 <b>Turbo Mode Active...</b>")
 
     last_ep = None
-    if video_queue:
-        last_ep = video_queue[0]['ep_num']
-
     for item in video_queue:
-        # Agar beech mein kisi ne cancel kar diya ho
-        if not is_processing:
-            break
-
+        if not is_processing: break
         msg = item['message']
         
-        # Jab Episode badle tab sticker bhejo
         if last_ep is not None and item['ep_num'] != last_ep:
             if target_sticker:
                 await client.send_sticker(chat_id, target_sticker)
-                await asyncio.sleep(0.5)
             last_ep = item['ep_num']
 
         try:
-            # Fast Copy using File ID
-            file_id = msg.video.file_id if msg.video else msg.document.file_id
-            
+            f_id = msg.video.file_id if msg.video else msg.document.file_id
             await client.send_video(
                 chat_id=chat_id,
-                video=file_id,
-                caption=item['caption'],
+                video=f_id,
+                caption=CUSTOM_CAPTION.format(
+                    anime_name=item['name'], ep=item['ep_str'], 
+                    season=item['season'], quality=item['quality']
+                ),
                 parse_mode=ParseMode.HTML,
                 supports_streaming=True
             )
-            
-            # Instant Delete
             await msg.delete()
-            # Minimal delay for max speed but avoiding flood
-            await asyncio.sleep(0.7) 
-            
+            await asyncio.sleep(0.6) # Faster Delay
         except Exception as e:
             print(f"Error: {e}")
 
-    # Final Sticker after last episode
     if is_processing and target_sticker:
         await client.send_sticker(chat_id, target_sticker)
 
-    if is_processing:
-        await status_msg.edit("✅ <b>Kaam tamman! Saari videos bhej di gayi hain.</b>")
-    
+    await status_msg.edit("✅ <b>Kaam Ho Gaya!</b>")
     video_queue = []
     is_processing = False
 
 @app.on_message((filters.video | filters.document) & filters.private & filters.user(ADMIN_ID))
 async def collector(client, message: Message):
     global video_queue
-    original_caption = message.caption or ""
-    
-    # Optimized Extraction
-    ep_match = re.search(r"(?i)(?:Episode|Ep)[\s\-:]*(\d+)", original_caption)
-    ep_num = int(ep_match.group(1)) if ep_match else 0
-    
-    quality_match = re.search(r"(?i)(1080p|720p|480p|360p|4K|2160p)", original_caption)
-    quality = quality_match.group(1) if quality_match else "HD"
-    
-    anime_match = re.search(r"(?i)(?:ᴀɴɪᴍᴇ|Anime|Name)[\s\-:]*(.+)", original_caption)
-    anime_name = anime_match.group(1).split('\n')[0].strip() if anime_match else "Anime"
-
-    new_caption = CAPTION_TEMPLATE.format(
-        anime_name=anime_name, ep=str(ep_num).zfill(2), season="01", quality=quality
-    )
+    name, ep_str, ep_num, season, quality = extract_data(message.caption or "")
 
     video_queue.append({
         'message': message,
+        'name': name,
+        'ep_str': ep_str,
         'ep_num': ep_num,
-        'q_rank': get_quality_rank(quality),
-        'caption': new_caption
+        'season': season,
+        'quality': quality,
+        'q_rank': get_quality_rank(quality)
     })
 
-    # Start processing if not already running
     if not is_processing:
-        # Wait for 3 seconds to collect more forwarded files
         await asyncio.sleep(3)
         if not is_processing and video_queue:
             await process_queue(client, message.chat.id)
