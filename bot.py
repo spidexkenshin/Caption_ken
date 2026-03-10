@@ -1,181 +1,346 @@
-import re
 import os
+import re
+import json
+import asyncio
 from pyrogram import Client, filters
 from pyrogram.types import Message
-from dotenv import load_dotenv
+from pyrogram.enums import ParseMode
 
-load_dotenv()
+# ─── Config ───
+API_ID = int(os.environ.get("API_ID", 0))
+API_HASH = os.environ.get("API_HASH", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+OWNER_ID = int(os.environ.get("OWNER_ID", 0))
 
-API_ID    = int(os.environ["API_ID"])
-API_HASH  = os.environ["API_HASH"]
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-ADMIN_IDS = list(map(int, os.environ.get("ADMIN_IDS", "0").split(",")))
+ADMINS_FILE = "admins.json"
+CAPTION_FILE = "caption.json"
 
+# ─── Default Caption Template ───
+DEFAULT_CAPTION = """<b><blockquote>💫 {anime_name} 💫</blockquote>
+
+‣ Episode : {ep}
+‣ Season : {season}
+‣ Quality : {quality}
+‣ Audio : Hindi Dub 🎙️ | Official
+
+━━━━━━━━━━━━━━━━━━━━━
+<blockquote>🚀 For More Join
+🔰 [@KENSHIN_ANIME]</blockquote>
+━━━━━━━━━━━━━━━━━━━━━</b>"""
+
+# ─── Helpers ───
+def load_json(file, default):
+    try:
+        with open(file, "r") as f:
+            return json.load(f)
+    except:
+        return default
+
+def save_json(file, data):
+    with open(file, "w") as f:
+        json.dump(data, f, indent=2)
+
+def get_admins():
+    data = load_json(ADMINS_FILE, {"admins": [OWNER_ID]})
+    if OWNER_ID not in data["admins"]:
+        data["admins"].append(OWNER_ID)
+        save_json(ADMINS_FILE, data)
+    return data["admins"]
+
+def is_admin(user_id):
+    return user_id in get_admins()
+
+def get_caption_template():
+    data = load_json(CAPTION_FILE, {"caption": DEFAULT_CAPTION})
+    return data["caption"]
+
+def set_caption_template(caption):
+    save_json(CAPTION_FILE, {"caption": caption})
+
+def extract_info(caption):
+    info = {"anime_name": "", "ep": "", "season": "01", "quality": "1080p"}
+    if not caption:
+        return info
+
+    lines = caption.strip().split("\n")
+
+    anime_match = re.search(r'(?:ᴀɴɪᴍᴇ|anime)[:\s]+(.+)', caption, re.IGNORECASE)
+    if anime_match:
+        info["anime_name"] = anime_match.group(1).strip()
+    else:
+        for line in lines:
+            clean = line.strip()
+            if clean and not re.match(r'^[━═─\-]+$', clean) and not any(k in clean.lower() for k in ['episode', 'season', 'quality', 'audio', 'powered', 'channel', 'ᴘᴏᴡᴇʀ', 'ᴍᴀɪɴ', '📟', '🎧', '📀', '⌬', '✻', '✾', '✵', '⧉', '➳']):
+                if len(clean) < 60 and not clean.startswith('@'):
+                    info["anime_name"] = clean
+                    break
+
+    ep_match = re.search(r'(?:episode|ep|ᴇᴘɪsᴏᴅᴇ|eᴘɪsᴏᴅᴇ)[:\s\-]*(\d+)', caption, re.IGNORECASE)
+    if ep_match:
+        info["ep"] = ep_match.group(1).strip()
+
+    season_match = re.search(r'(?:season|s)[:\s\-]*(\d+)', caption, re.IGNORECASE)
+    if season_match:
+        info["season"] = season_match.group(1).strip()
+    else:
+        s_match = re.search(r'S(\d+)', caption)
+        if s_match:
+            info["season"] = s_match.group(1)
+        s_match2 = re.search(r'S([¹²³⁴⁵⁶⁷⁸⁹⁰]+)', caption)
+        if s_match2:
+            superscript_map = {'¹':'1','²':'2','³':'3','⁴':'4','⁵':'5','⁶':'6','⁷':'7','⁸':'8','⁹':'9','⁰':'0'}
+            info["season"] = ''.join(superscript_map.get(c, c) for c in s_match2.group(1))
+
+    quality_match = re.search(r'(\d{3,4}p|4[kK]|2160p)', caption, re.IGNORECASE)
+    if quality_match:
+        q = quality_match.group(1)
+        if q.lower() in ['4k']:
+            q = '2160p'
+        info["quality"] = q
+
+    return info
+
+def get_quality_order(quality):
+    order = {"480p": 0, "720p": 1, "1080p": 2, "1440p": 3, "2160p": 4, "4k": 4}
+    return order.get(quality.lower(), 2)
+
+# ─── Bot Init ───
 app = Client("caption_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-DEFAULT_CAPTION = (
-    "<b><blockquote>ð« {anime_name} ð«</blockquote>\n"
-    "‣ Episode : {ep}\n"
-    "‣ Season  : {season}\n"
-    "‣ Quality : {quality}\n"
-    "‣ Audio   : Hindi Dub ð️ | Official\n"
-    "━━━━━━━━━━━━━━━━━━━━━\n"
-    "<blockquote>ð For More Join\n"
-    "ð° [@KENSHIN_ANIME]</blockquote>\n"
-    "━━━━━━━━━━━━━━━━━━━━━</b>"
-)
-
-QUALITY_RANK = {
-    "480p": 1, "720p": 2, "1080p": 3,
-    "2k": 4, "4k": 5, "2160p": 5
-}
-
-user_captions: dict[int, str] = {}
-batch_queue:   dict[int, list] = {}
-
-
-def is_admin(uid: int) -> bool:
-    return uid in ADMIN_IDS
-
-
-def parse_caption(text: str) -> dict:
-    text = text or ""
-    data = {"anime_name": "Unknown", "ep": "01", "season": "01", "quality": "1080p"}
-
-    m = re.search(r'(?:episode|ep|eᴘɪˢᴏᴅᴇ|U0001F4DF)[^d]*(d+)', text, re.IGNORECASE)
-    if m:
-        data["ep"] = m.group(1).zfill(2)
-
-    m = re.search(r'(?:season|s)[^d]*(d+)', text, re.IGNORECASE)
-    if m:
-        data["season"] = m.group(1).zfill(2)
-    elif re.search(r'S¹', text):
-        data["season"] = "01"
-
-    m = re.search(r'(2160p|4k|1080p|720p|480p)', text, re.IGNORECASE)
-    if m:
-        data["quality"] = m.group(1).lower().replace("4k", "4K").replace("2160p", "4K")
-
-    for line in text.split("
-"):
-        clean = re.sub(
-            r'[━-=_•*|#@✻✾✵⧉⯌►➳U0001F3ACU0001F4DFU0001F3A7U0001F4C0⧉]|'
-            r'[.*?]|episode.*|eps*d.*|season.*|quality.*|audio.*|'
-            r'language.*|powered.*|ᴀɴɪᴏᴋᴇs*:',
-            '', line, flags=re.IGNORECASE
-        ).strip()
-        clean = re.sub(r's+', ' ', clean).strip()
-        if len(clean) > 2 and not clean.startswith("@"):
-            data["anime_name"] = clean
-            break
-
-    return data
-
-
-def build_caption(uid: int, data: dict) -> str:
-    template = user_captions.get(uid, DEFAULT_CAPTION)
-    return template.format(**data)
-
-
-@app.on_message(filters.command("start"))
-async def cmd_start(_, msg: Message):
-    await msg.reply("<blockquote>Jinda hu abhi..</blockquote>", parse_mode="html")
-
-
-@app.on_message(filters.command("help"))
-async def cmd_help(_, msg: Message):
-    await msg.reply(
-        "<b>ð Help Menu</b>\n\n"
-        "/start — Bot status check\n"
-        "/setcaption — Custom caption set karo (placeholders: {anime_name}, {ep}, {season}, {quality})\n"
-        "/resetcaption — Default caption restore karo\n"
-        "/batch — Queued videos ko sorted bhejo\n"
-        "/clearbatch — Queue clear karo\n"
-        "/help — Yeh menu\n\n"
-        "<b>Usage:</b>\n"
-        "1. Koi bhi video forward karo — bot caption replace karke bhejega.\n"
-        "2. Multiple videos bhejo → /batch se sorted (ep + quality) bhejega.",
-        parse_mode="html"
-    )
-
-
-@app.on_message(filters.command("setcaption"))
-async def cmd_setcaption(_, msg: Message):
-    if not is_admin(msg.from_user.id):
-        return await msg.reply("❌ Sirf admins ke liye hai.")
-    parts = msg.text.split(None, 1)
-    if len(parts) < 2:
-        return await msg.reply(
-            "Usage:\n<code>/setcaption &lt;your template&gt;</code>\n\n"
-            "Placeholders: <code>{anime_name}</code> <code>{ep}</code> "
-            "<code>{season}</code> <code>{quality}</code>",
-            parse_mode="html"
-        )
-    user_captions[msg.from_user.id] = parts[1].strip()
-    await msg.reply("✅ Caption template save ho gaya.")
-
-
-@app.on_message(filters.command("resetcaption"))
-async def cmd_resetcaption(_, msg: Message):
-    if not is_admin(msg.from_user.id):
-        return await msg.reply("❌ Sirf admins ke liye hai.")
-    user_captions.pop(msg.from_user.id, None)
-    await msg.reply("✅ Default caption restore ho gaya.")
-
-
-@app.on_message(filters.command("clearbatch"))
-async def cmd_clearbatch(_, msg: Message):
-    if not is_admin(msg.from_user.id):
-        return await msg.reply("❌ Sirf admins ke liye hai.")
-    batch_queue.pop(msg.from_user.id, None)
-    await msg.reply("ð¡️ Batch queue clear ho gayi.")
-
-
-@app.on_message(filters.command("batch"))
-async def cmd_batch(_, msg: Message):
-    if not is_admin(msg.from_user.id):
-        return await msg.reply("❌ Sirf admins ke liye hai.")
-    uid   = msg.from_user.id
-    queue = batch_queue.get(uid, [])
-    if not queue:
-        return await msg.reply("Queue khali hai. Pehle videos bhejo.")
-
-    queue.sort(key=lambda x: (x[0], x[1]))
-
-    await msg.reply(f"ð¤ {len(queue)} videos sorted order mein bhej raha hoon...")
-    for _, _, original_msg, data in queue:
-        caption = build_caption(uid, data)
-        await original_msg.copy(msg.chat.id, caption=caption, parse_mode="html")
-
-    batch_queue[uid] = []
-    await msg.reply("✅ Sab videos bhej diye. Queue clear.")
-
-
-@app.on_message(filters.video | filters.document)
-async def handle_video(_, msg: Message):
-    if not is_admin(msg.from_user.id):
+@app.on_message(filters.command("start") & filters.private)
+async def start_cmd(client, message: Message):
+    if not is_admin(message.from_user.id):
+        await message.reply("❌ You are not authorized.")
         return
+    await message.reply("<blockquote>Jinda hu abhi..</blockquote>", parse_mode=ParseMode.HTML)
 
-    uid     = msg.from_user.id
-    caption = msg.caption or ""
-    data    = parse_caption(caption)
-    ep_num  = int(data["ep"]) if data["ep"].isdigit() else 0
-    q_rank  = QUALITY_RANK.get(data["quality"].lower(), 3)
+@app.on_message(filters.command("help") & filters.private)
+async def help_cmd(client, message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    help_text = """<b>📖 Bot Commands:</b>
 
-    if uid not in batch_queue:
-        batch_queue[uid] = []
-    batch_queue[uid].append((ep_num, q_rank, msg, data))
+<b>Basic:</b>
+/start - Check if bot is alive
+/help - Show this help
 
-    new_caption = build_caption(uid, data)
-    await msg.copy(msg.chat.id, caption=new_caption, parse_mode="html")
-    await msg.reply(
-        f"✅ Caption replace ho gaya.\n"
-        f"ð¦ Batch queue mein bhi add ho gaya (total: {len(batch_queue[uid])}).\n"
-        f"Sorted bhejne ke liye /batch use karo.",
-        quote=True
+<b>Caption:</b>
+/setcaption - Set custom caption template
+/getcaption - View current caption template
+/resetcaption - Reset to default caption
+
+<b>Rename:</b>
+• Forward any video to rename its caption
+/batch - Batch rename from channel
+/sort - Sort and send videos by episode & quality
+
+<b>Admin:</b>
+/addadmin [user_id] - Add admin
+/deladmin [user_id] - Remove admin
+/admins - List all admins
+
+<b>Placeholders:</b>
+<code>{anime_name}</code> - Anime name
+<code>{ep}</code> - Episode number
+<code>{season}</code> - Season number
+<code>{quality}</code> - Video quality
+"""
+    await message.reply(help_text, parse_mode=ParseMode.HTML)
+
+@app.on_message(filters.command("setcaption") & filters.private)
+async def setcaption_cmd(client, message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    if len(message.text.split(None, 1)) < 2:
+        await message.reply("Usage: /setcaption <your caption template>\n\nPlaceholders: {anime_name}, {ep}, {season}, {quality}")
+        return
+    new_caption = message.text.split(None, 1)[1]
+    set_caption_template(new_caption)
+    await message.reply("✅ Caption template updated!")
+
+@app.on_message(filters.command("getcaption") & filters.private)
+async def getcaption_cmd(client, message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    caption = get_caption_template()
+    await message.reply(f"<b>Current Caption Template:</b>\n\n<code>{caption}</code>", parse_mode=ParseMode.HTML)
+
+@app.on_message(filters.command("resetcaption") & filters.private)
+async def resetcaption_cmd(client, message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    set_caption_template(DEFAULT_CAPTION)
+    await message.reply("✅ Caption reset to default!")
+
+@app.on_message(filters.command("addadmin") & filters.private)
+async def addadmin_cmd(client, message: Message):
+    if message.from_user.id != OWNER_ID:
+        await message.reply("❌ Only owner can add admins.")
+        return
+    try:
+        new_admin = int(message.text.split()[1])
+    except:
+        await message.reply("Usage: /addadmin <user_id>")
+        return
+    admins = get_admins()
+    if new_admin in admins:
+        await message.reply("Already an admin.")
+        return
+    admins.append(new_admin)
+    save_json(ADMINS_FILE, {"admins": admins})
+    await message.reply(f"✅ Admin added: <code>{new_admin}</code>", parse_mode=ParseMode.HTML)
+
+@app.on_message(filters.command("deladmin") & filters.private)
+async def deladmin_cmd(client, message: Message):
+    if message.from_user.id != OWNER_ID:
+        await message.reply("❌ Only owner can remove admins.")
+        return
+    try:
+        del_admin = int(message.text.split()[1])
+    except:
+        await message.reply("Usage: /deladmin <user_id>")
+        return
+    if del_admin == OWNER_ID:
+        await message.reply("❌ Cannot remove owner.")
+        return
+    admins = get_admins()
+    if del_admin not in admins:
+        await message.reply("Not an admin.")
+        return
+    admins.remove(del_admin)
+    save_json(ADMINS_FILE, {"admins": admins})
+    await message.reply(f"✅ Admin removed: <code>{del_admin}</code>", parse_mode=ParseMode.HTML)
+
+@app.on_message(filters.command("admins") & filters.private)
+async def admins_cmd(client, message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    admins = get_admins()
+    text = "<b>👥 Admin List:</b>\n\n"
+    for a in admins:
+        tag = "👑 Owner" if a == OWNER_ID else "🔹 Admin"
+        text += f"{tag}: <code>{a}</code>\n"
+    await message.reply(text, parse_mode=ParseMode.HTML)
+
+@app.on_message(filters.video & filters.private)
+async def rename_video(client, message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    status = await message.reply("⏳ Processing...")
+    old_caption = message.caption or ""
+    info = extract_info(old_caption)
+    template = get_caption_template()
+    new_caption = template.format(
+        anime_name=info["anime_name"],
+        ep=info["ep"],
+        season=info["season"],
+        quality=info["quality"]
     )
+    try:
+        await message.copy(
+            chat_id=message.chat.id,
+            caption=new_caption,
+            parse_mode=ParseMode.HTML
+        )
+        await status.edit("✅ Done!")
+    except Exception as e:
+        await status.edit(f"❌ Error: {e}")
 
+@app.on_message(filters.command("batch") & filters.private)
+async def batch_cmd(client, message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    args = message.text.split()
+    if len(args) < 2:
+        await message.reply("Usage: /batch <channel_username_or_id> [limit]\n\nExample: /batch @MyChannel 50")
+        return
+    channel = args[1]
+    limit = int(args[2]) if len(args) > 2 else 100
+    status = await message.reply(f"⏳ Fetching videos from {channel}...")
+    videos = []
+    try:
+        async for msg in client.get_chat_history(channel, limit=limit):
+            if msg.video:
+                videos.append(msg)
+    except Exception as e:
+        await status.edit(f"❌ Error: {e}\n\nMake sure bot is admin in the channel.")
+        return
+    if not videos:
+        await status.edit("No videos found.")
+        return
+    await status.edit(f"📦 Found {len(videos)} videos. Renaming...")
+    template = get_caption_template()
+    count = 0
+    for vid in videos:
+        old_caption = vid.caption or ""
+        info = extract_info(old_caption)
+        new_caption = template.format(
+            anime_name=info["anime_name"],
+            ep=info["ep"],
+            season=info["season"],
+            quality=info["quality"]
+        )
+        try:
+            await vid.copy(
+                chat_id=message.chat.id,
+                caption=new_caption,
+                parse_mode=ParseMode.HTML
+            )
+            count += 1
+            await asyncio.sleep(1.5)
+        except Exception as e:
+            await message.reply(f"⚠️ Skip: {e}")
+    await status.edit(f"✅ Done! Renamed {count}/{len(videos)} videos.")
 
-if __name__ == "__main__":
-    print("Bot chal raha hai...")
-    app.run()
+@app.on_message(filters.command("sort") & filters.private)
+async def sort_cmd(client, message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    args = message.text.split()
+    if len(args) < 2:
+        await message.reply("Usage: /sort <channel_username_or_id> [limit]\n\nSorts by Episode → Quality (480p→720p→1080p→4k)")
+        return
+    channel = args[1]
+    limit = int(args[2]) if len(args) > 2 else 100
+    status = await message.reply(f"⏳ Fetching & sorting from {channel}...")
+    videos = []
+    try:
+        async for msg in client.get_chat_history(channel, limit=limit):
+            if msg.video:
+                info = extract_info(msg.caption or "")
+                videos.append({"msg": msg, "info": info})
+    except Exception as e:
+        await status.edit(f"❌ Error: {e}")
+        return
+    if not videos:
+        await status.edit("No videos found.")
+        return
+    videos.sort(key=lambda x: (
+        int(x["info"]["ep"]) if x["info"]["ep"].isdigit() else 999,
+        get_quality_order(x["info"]["quality"])
+    ))
+    await status.edit(f"📦 Sorted {len(videos)} videos. Sending...")
+    template = get_caption_template()
+    count = 0
+    for item in videos:
+        info = item["info"]
+        new_caption = template.format(
+            anime_name=info["anime_name"],
+            ep=info["ep"],
+            season=info["season"],
+            quality=info["quality"]
+        )
+        try:
+            await item["msg"].copy(
+                chat_id=message.chat.id,
+                caption=new_caption,
+                parse_mode=ParseMode.HTML
+            )
+            count += 1
+            await asyncio.sleep(1.5)
+        except Exception as e:
+            await message.reply(f"⚠️ Skip: {e}")
+    await status.edit(f"✅ Sorted & sent {count}/{len(videos)} videos.")
+
+print("Bot is starting...")
+app.run()
