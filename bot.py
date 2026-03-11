@@ -3,9 +3,9 @@ import re
 import asyncio
 import time
 from collections import defaultdict
-from pyrofork import Client, filters
-from pyrofork.types import Message
-from pyrofork.enums import ParseMode
+from pyrogram import Client, filters
+from pyrogram import Message
+from pyrogram.enums import ParseMode
 
 # ========== CONFIGURATION ==========
 API_ID = int(os.environ.get("API_ID", 0))
