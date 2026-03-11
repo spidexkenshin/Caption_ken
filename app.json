@@ -1,0 +1,30 @@
+{
+  "name": "Caption Changer Bot",
+  "description": "Telegram bot to rename video captions with placeholders and batch processing",
+  "repository": "https://github.com/yourusername/caption-changer-bot",
+  "logo": "https://telegram.org/img/t_logo.png",
+  "keywords": ["telegram", "bot", "caption", "rename", "pyrogram"],
+  "env": {
+    "API_ID": {
+      "description": "Get from my.telegram.org",
+      "required": true
+    },
+    "API_HASH": {
+      "description": "Get from my.telegram.org",
+      "required": true
+    },
+    "BOT_TOKEN": {
+      "description": "Get from @BotFather",
+      "required": true
+    },
+    "ADMIN_IDS": {
+      "description": "Admin user IDs separated by space (e.g., 123456789 987654321)",
+      "required": true
+    }
+  },
+  "buildpacks": [
+    {
+      "url": "heroku/python"
+    }
+  ]
+}
