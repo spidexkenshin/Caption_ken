@@ -1,7 +1,9 @@
 import os
 import re
 import asyncio
-from pyrofork import Client, filters, idle
+import time
+from collections import defaultdict
+from pyrofork import Client, filters
 from pyrofork.types import Message
 from pyrofork.enums import ParseMode
 
@@ -25,10 +27,12 @@ DEFAULT_CAPTION = """<b><blockquote>💫 {anime_name} 💫</blockquote>
 ━━━━━━━━━━━━━━━━━━━━━</b>"""
 
 # Global storage
-user_captions = {}  # user_id -> custom caption
-user_rename_sessions = {}  # user_id -> {chat_id, start_msg_id, end_msg_id}
+user_captions = {}
+user_rename_sessions = {}
+video_queues = defaultdict(list)  # user_id -> list of videos to process
+processing_status = {}  # user_id -> processing status
 
-# Quality order for sorting (lowest to highest)
+# Quality order for sorting
 QUALITY_ORDER = {
     '144p': 1, '240p': 2, '360p': 3, '480p': 4,
     '720p': 5, '1080p': 6, '1440p': 7, '2k': 7,
@@ -41,129 +45,263 @@ app = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    workers=100  # High speed processing
+    workers=200,
+    max_concurrent_transmissions=50
 )
 
 # ========== HELPER FUNCTIONS ==========
 
 def is_admin(user_id: int) -> bool:
-    """Check if user is admin"""
     return user_id in ADMIN_IDS
 
 def extract_info_from_caption(caption: str) -> dict:
-    """Extract anime info from original caption"""
-    info = {
-        'anime_name': '',
-        'ep': 'N/A',
-        'season': 'S01',
-        'quality': '1080p'
-    }
-    
+    info = {'anime_name': '', 'ep': 'N/A', 'season': 'S01', 'quality': '1080p'}
     if not caption:
         return info
     
-    # Pattern 1: 📟 Episode - 24  ( S01 )
-    ep_match = re.search(r'[Ee]pisode\s*[-:]?\s*(\d+)', caption)
-    if ep_match:
-        info['ep'] = ep_match.group(1)
-    
-    # Pattern 2: ⌬ Episode: 07
-    if info['ep'] == 'N/A':
-        ep_match2 = re.search(r'[Ee]pisode\s*[:=]\s*(\d+)', caption)
-        if ep_match2:
-            info['ep'] = ep_match2.group(1)
+    # Episode patterns
+    ep_patterns = [
+        r'[Ee]pisode\s*[-:]?\s*(\d+)',
+        r'[Ee]pisode\s*[:=]\s*(\d+)',
+        r'[Ee]p\s*(\d+)',
+        r'[#\s](\d+)[\s\n]'
+    ]
+    for pattern in ep_patterns:
+        match = re.search(pattern, caption)
+        if match:
+            info['ep'] = match.group(1)
+            break
     
     # Season patterns
-    season_match = re.search(r'[Ss]0?(\d+)', caption)
+    season_match = re.search(r'[Ss]0?(\d+)|[Ss]eason\s*(\d+)', caption)
     if season_match:
-        info['season'] = f"S0{season_match.group(1)}"
+        season_num = season_match.group(1) or season_match.group(2)
+        info['season'] = f"S0{season_num}"
     
     # Quality patterns
-    quality_patterns = [
-        r'(\d{3,4}p)',  # 1080p, 720p, 480p
-        r'4[Kk]',       # 4K
-        r'2[Kk]',       # 2K
-        r'8[Kk]',       # 8K
-    ]
-    for pattern in quality_patterns:
+    q_patterns = [r'(\d{3,4}p)', r'4[Kk]', r'2[Kk]', r'8[Kk]']
+    for pattern in q_patterns:
         q_match = re.search(pattern, caption, re.IGNORECASE)
         if q_match:
             info['quality'] = q_match.group(0).lower()
             break
     
     # Anime name extraction
-    # Pattern: 🎬 ᴀɴɪᴍᴇ: To Be Hero X
-    anime_match = re.search(r'[🎬📟]\s*[Aa]nime[:\-]?\s*([^\n]+)', caption)
-    if anime_match:
-        info['anime_name'] = anime_match.group(1).strip()
-    else:
-        # Try to get from first line or default
+    anime_patterns = [
+        r'[🎬📟🎥]\s*[Aa]nime[:\-]?\s*([^\n]+)',
+        r'[Nn]ame[:\-]?\s*([^\n]+)',
+    ]
+    for pattern in anime_patterns:
+        anime_match = re.search(pattern, caption)
+        if anime_match:
+            info['anime_name'] = anime_match.group(1).strip()
+            break
+    
+    # If no anime name found, try first clean line
+    if not info['anime_name']:
         lines = caption.strip().split('\n')
-        if lines:
-            first_line = lines[0].strip()
-            # Remove emojis and clean
-            clean = re.sub(r'[^\w\s\-]', '', first_line).strip()
-            if clean and len(clean) > 2:
+        for line in lines[:2]:
+            clean = re.sub(r'[^\w\s\-]', '', line).strip()
+            if clean and len(clean) > 2 and not any(x in clean.lower() for x in ['episode', 'season', 'quality']):
                 info['anime_name'] = clean
+                break
     
     return info
 
 def get_quality_priority(quality: str) -> int:
-    """Get sorting priority for quality"""
     q = quality.lower().replace(' ', '')
     for key, value in QUALITY_ORDER.items():
         if key in q:
             return value
     return 99
 
+def extract_info_from_filename(filename: str) -> dict:
+    info = {'anime_name': '', 'ep': 'N/A', 'season': 'S01', 'quality': '1080p'}
+    name = os.path.splitext(filename)[0]
+    
+    # Episode
+    ep_match = re.search(r'[Ee]p?(\d+)|[Ee]pisode\s*(\d+)', name, re.IGNORECASE)
+    if ep_match:
+        info['ep'] = ep_match.group(1) or ep_match.group(2)
+    
+    # Season
+    season_match = re.search(r'[Ss]0?(\d+)|[Ss]eason\s*(\d+)', name, re.IGNORECASE)
+    if season_match:
+        info['season'] = f"S0{season_match.group(1) or season_match.group(2)}"
+    
+    # Quality
+    q_match = re.search(r'(\d{3,4}p|4[Kk]|2[Kk]|8[Kk])', name, re.IGNORECASE)
+    if q_match:
+        info['quality'] = q_match.group(0).lower()
+    
+    # Anime name
+    name_clean = re.sub(r'[._\-]', ' ', name)
+    parts = re.split(r'[Ss]\d+|[Ee]p?\d+', name_clean, flags=re.IGNORECASE)
+    if parts and parts[0].strip():
+        info['anime_name'] = parts[0].strip()
+    
+    return info
+
 def parse_caption_template(template: str, info: dict) -> str:
-    """Parse caption template with placeholders"""
     try:
         return template.format(**info)
     except:
         return DEFAULT_CAPTION.format(**info)
 
-def extract_info_from_filename(filename: str) -> dict:
-    """Extract info from video filename"""
-    info = {
-        'anime_name': '',
-        'ep': 'N/A',
-        'season': 'S01',
-        'quality': '1080p'
-    }
+# ========== AUTO PROCESSING QUEUE ==========
+
+async def process_video_queue(user_id: int, chat_id: int):
+    """Process queued videos for a user"""
+    if processing_status.get(user_id, False):
+        return
     
-    # Remove extension
-    name = os.path.splitext(filename)[0]
+    processing_status[user_id] = True
+    queue = video_queues[user_id]
     
-    # Episode pattern
-    ep_match = re.search(r'[Ee]p?(\d+)|[Ee]pisode\s*(\d+)', name, re.IGNORECASE)
-    if ep_match:
-        ep_num = ep_match.group(1) or ep_match.group(2)
-        info['ep'] = ep_num
+    if not queue:
+        processing_status[user_id] = False
+        return
     
-    # Season pattern
-    season_match = re.search(r'[Ss]0?(\d+)', name, re.IGNORECASE)
-    if season_match:
-        info['season'] = f"S0{season_match.group(1)}"
+    # Send processing message
+    status_msg = await app.send_message(
+        chat_id,
+        f"<b>⏳ Processing {len(queue)} videos...</b>\n<i>Sorting and renaming captions...</i>",
+        parse_mode=ParseMode.HTML
+    )
     
-    # Quality pattern
-    q_match = re.search(r'(\d{3,4}p|4[Kk]|2[Kk]|8[Kk])', name, re.IGNORECASE)
-    if q_match:
-        info['quality'] = q_match.group(0).lower()
+    try:
+        # Get user caption template
+        caption_template = user_captions.get(user_id, DEFAULT_CAPTION)
+        
+        # Process all videos and extract info
+        processed_videos = []
+        
+        for item in queue:
+            msg = item['message']
+            info = None
+            
+            # Try caption first
+            if msg.caption:
+                info = extract_info_from_caption(msg.caption)
+            
+            # Try filename
+            if not info or not info['anime_name']:
+                filename = ""
+                if msg.video and msg.video.file_name:
+                    filename = msg.video.file_name
+                elif msg.document and msg.document.file_name:
+                    filename = msg.document.file_name
+                
+                if filename:
+                    file_info = extract_info_from_filename(filename)
+                    if info:
+                        file_info.update({k: v for k, v in info.items() if v and v != 'N/A'})
+                    info = file_info
+            
+            if not info:
+                info = {'anime_name': 'Unknown Anime', 'ep': '01', 'season': 'S01', 'quality': '1080p'}
+            
+            # Generate new caption
+            new_caption = parse_caption_template(caption_template, info)
+            
+            processed_videos.append({
+                'msg': msg,
+                'caption': new_caption,
+                'ep_num': int(info['ep']) if str(info['ep']).isdigit() else 999,
+                'quality_priority': get_quality_priority(info['quality']),
+                'info': info
+            })
+        
+        # Sort: Episode first, then Quality
+        processed_videos.sort(key=lambda x: (x['ep_num'], x['quality_priority']))
+        
+        # Clear queue
+        video_queues[user_id] = []
+        
+        # Send sorted videos
+        total = len(processed_videos)
+        success = 0
+        failed = 0
+        
+        await status_msg.edit_text(
+            f"<b>⚡ Sending {total} videos...</b>\n"
+            f"<i>Sorted by Episode -> Quality</i>",
+            parse_mode=ParseMode.HTML
+        )
+        
+        for idx, item in enumerate(processed_videos, 1):
+            try:
+                msg = item['msg']
+                caption = item['caption']
+                
+                if msg.video:
+                    await app.send_video(
+                        chat_id=chat_id,
+                        video=msg.video.file_id,
+                        caption=caption,
+                        parse_mode=ParseMode.HTML,
+                        duration=msg.video.duration,
+                        width=msg.video.width,
+                        height=msg.video.height,
+                        thumb=msg.video.thumbs[0].file_id if msg.video.thumbs else None,
+                        supports_streaming=True
+                    )
+                elif msg.document:
+                    await app.send_document(
+                        chat_id=chat_id,
+                        document=msg.document.file_id,
+                        caption=caption,
+                        parse_mode=ParseMode.HTML,
+                        thumb=msg.document.thumbs[0].file_id if msg.document.thumbs else None
+                    )
+                elif msg.animation:
+                    await app.send_animation(
+                        chat_id=chat_id,
+                        animation=msg.animation.file_id,
+                        caption=caption,
+                        parse_mode=ParseMode.HTML
+                    )
+                
+                success += 1
+                
+                # Update progress every 10 videos
+                if idx % 10 == 0 or idx == total:
+                    await status_msg.edit_text(
+                        f"<b>⏳ Progress: {idx}/{total}</b>\n"
+                        f"✅ Sent: {success}\n"
+                        f"❌ Failed: {failed}\n\n"
+                        f"<i>Sorting: Ep {item['info']['ep']} | {item['info']['quality']}</i>",
+                        parse_mode=ParseMode.HTML
+                    )
+                
+                # Small delay to prevent flood
+                await asyncio.sleep(0.3)
+                
+            except Exception as e:
+                failed += 1
+                continue
+        
+        # Final message
+        await status_msg.edit_text(
+            f"<b>🎉 Complete! Processed {total} videos</b>\n\n"
+            f"✅ <b>Success:</b> {success}\n"
+            f"❌ <b>Failed:</b> {failed}\n\n"
+            f"<i>✓ Sorted by Episode Number\n"
+            f"✓ Sorted by Quality (480p→720p→1080p→4K)\n"
+            f"✓ Captions renamed with template</i>",
+            parse_mode=ParseMode.HTML
+        )
+        
+    except Exception as e:
+        await status_msg.edit_text(f"<b>❌ Error:</b> {str(e)}", parse_mode=ParseMode.HTML)
     
-    # Anime name (everything before episode/season)
-    name_clean = re.sub(r'[._\-]', ' ', name)
-    anime_match = re.split(r'[Ss]\d+|[Ee]p?\d+', name_clean, flags=re.IGNORECASE)[0]
-    if anime_match:
-        info['anime_name'] = anime_match.strip()
-    
-    return info
+    finally:
+        processing_status[user_id] = False
 
 # ========== COMMAND HANDLERS ==========
 
 @app.on_message(filters.command("start") & filters.private)
 async def start_handler(client: Client, message: Message):
-    """Start command handler"""
     if not is_admin(message.from_user.id):
         return await message.reply("⚠️ You are not authorized to use this bot.")
     
@@ -174,47 +312,48 @@ async def start_handler(client: Client, message: Message):
 
 @app.on_message(filters.command("help") & filters.private)
 async def help_handler(client: Client, message: Message):
-    """Help command handler"""
     if not is_admin(message.from_user.id):
         return
     
     help_text = """<b>📋 Available Commands:</b>
 
-<code>/start</code> - Check if bot is alive
-<code>/help</code> - Show this help message
-<code>/setcaption</code> - Set custom caption template
-<code>/viewcaption</code> - View current caption template
-<code>/resetcaption</code> - Reset to default caption
-<code>/rename</code> - Start batch rename session
+<code>/start</code> - Check bot status
+<code>/help</code> - Show this help
+<code>/setcaption</code> - Set custom caption
+<code>/viewcaption</code> - View current caption
+<code>/resetcaption</code> - Reset to default
+<code>/process</code> - Process queued videos manually
+<code>/clear</code> - Clear video queue
 
-<b>📝 Caption Placeholders:</b>
-• <code>{anime_name}</code> - Anime name
-• <code>{ep}</code> - Episode number
-• <code>{season}</code> - Season number
-• <code>{quality}</code> - Video quality
+<b>🚀 Auto Features:</b>
+• Send multiple videos → Auto queued
+• Auto rename captions
+• Auto sort by Episode → Quality
+• Supports 100+ videos at once
 
-<b>⚡ Rename Usage:</b>
-1. Send <code>/rename</code>
-2. Reply to the FIRST message of batch with <code>/startbatch</code>
-3. Reply to the LAST message of batch with <code>/endbatch</code>
-4. Bot will process all messages between them
+<b>📝 Placeholders:</b>
+• {anime_name} - Anime name
+• {ep} - Episode number  
+• {season} - Season
+• {quality} - Quality (480p/720p/1080p/4K)
 
-<b>🔰 Admin Only Bot</b>"""
+<b>⚡ How to use:</b>
+Just send videos (1 by 1 or multiple)
+Bot will auto collect, sort & send back!
+Or use /process to process manually"""
     
     await message.reply(help_text, parse_mode=ParseMode.HTML)
 
 @app.on_message(filters.command("setcaption") & filters.private)
 async def set_caption_handler(client: Client, message: Message):
-    """Set custom caption template"""
     if not is_admin(message.from_user.id):
         return
     
     if len(message.command) < 2 and not message.reply_to_message:
         return await message.reply(
             "<b>⚠️ Usage:</b>\n"
-            "<code>/setcaption your caption template</code>\n\n"
-            "<b>Or reply to a message with caption template</b>\n\n"
-            "<b>Available placeholders:</b>\n"
+            "<code>/setcaption your template</code>\n\n"
+            "<b>Placeholders:</b>\n"
             "• {anime_name}\n"
             "• {ep}\n"
             "• {season}\n"
@@ -222,7 +361,6 @@ async def set_caption_handler(client: Client, message: Message):
             parse_mode=ParseMode.HTML
         )
     
-    # Get caption from command or reply
     if message.reply_to_message and message.reply_to_message.text:
         new_caption = message.reply_to_message.text
     else:
@@ -230,359 +368,237 @@ async def set_caption_handler(client: Client, message: Message):
     
     user_captions[message.from_user.id] = new_caption
     
-    # Preview
-    preview_info = {
+    preview = parse_caption_template(new_caption, {
         'anime_name': 'Demon Slayer',
         'ep': '05',
         'season': 'S01',
         'quality': '1080p'
-    }
-    preview = parse_caption_template(new_caption, preview_info)
+    })
     
     await message.reply(
         f"<b>✅ Caption template set!</b>\n\n"
-        f"<b>📊 Preview:</b>\n{preview}",
+        f"<b>Preview:</b>\n{preview}",
         parse_mode=ParseMode.HTML
     )
 
 @app.on_message(filters.command("viewcaption") & filters.private)
 async def view_caption_handler(client: Client, message: Message):
-    """View current caption template"""
     if not is_admin(message.from_user.id):
         return
     
-    user_id = message.from_user.id
-    current = user_captions.get(user_id, DEFAULT_CAPTION)
-    
-    preview_info = {
+    current = user_captions.get(message.from_user.id, DEFAULT_CAPTION)
+    preview = parse_caption_template(current, {
         'anime_name': 'Attack on Titan',
         'ep': '12',
         'season': 'S04',
         'quality': '720p'
-    }
-    preview = parse_caption_template(current, preview_info)
+    })
     
     await message.reply(
-        f"<b>📝 Current Caption Template:</b>\n<code>{current}</code>\n\n"
-        f"<b>📊 Preview:</b>\n{preview}",
+        f"<b>📝 Current Caption:</b>\n<code>{current}</code>\n\n"
+        f"<b>Preview:</b>\n{preview}",
         parse_mode=ParseMode.HTML
     )
 
 @app.on_message(filters.command("resetcaption") & filters.private)
 async def reset_caption_handler(client: Client, message: Message):
-    """Reset caption to default"""
     if not is_admin(message.from_user.id):
         return
     
     user_captions.pop(message.from_user.id, None)
     
-    preview_info = {
-        'anime_name': 'One Piece',
-        'ep': '1080',
-        'season': 'S01',
-        'quality': '1080p'
-    }
-    preview = parse_caption_template(DEFAULT_CAPTION, preview_info)
-    
     await message.reply(
-        f"<b>✅ Caption reset to default!</b>\n\n"
-        f"<b>📊 Preview:</b>\n{preview}",
+        "<b>✅ Caption reset to default!</b>",
         parse_mode=ParseMode.HTML
     )
 
-# ========== RENAME SESSION HANDLERS ==========
-
-@app.on_message(filters.command("rename") & filters.private)
-async def rename_start_handler(client: Client, message: Message):
-    """Start rename batch session"""
+@app.on_message(filters.command("process") & filters.private)
+async def process_handler(client: Client, message: Message):
+    """Manually trigger processing of queued videos"""
     if not is_admin(message.from_user.id):
         return
     
     user_id = message.from_user.id
-    user_rename_sessions[user_id] = {'step': 'waiting_first'}
+    
+    if not video_queues[user_id]:
+        return await message.reply("<b>ℹ️ No videos in queue!</b>", parse_mode=ParseMode.HTML)
+    
+    if processing_status.get(user_id, False):
+        return await message.reply("<b>⏳ Already processing! Wait...</b>", parse_mode=ParseMode.HTML)
+    
+    await process_video_queue(user_id, message.chat.id)
+
+@app.on_message(filters.command("clear") & filters.private)
+async def clear_handler(client: Client, message: Message):
+    """Clear video queue"""
+    if not is_admin(message.from_user.id):
+        return
+    
+    user_id = message.from_user.id
+    count = len(video_queues[user_id])
+    video_queues[user_id] = []
     
     await message.reply(
-        "<b>🔄 Batch Rename Mode Activated!</b>\n\n"
-        "1️⃣ <b>Reply to the FIRST message</b> of the batch with <code>/startbatch</code>\n"
-        "2️⃣ <b>Reply to the LAST message</b> of the batch with <code>/endbatch</code>\n\n"
-        "<i>Bot will process all video messages between them, rename captions, and sort by episode & quality.</i>",
+        f"<b>🗑️ Cleared {count} videos from queue!</b>",
+        parse_mode=ParseMode.HTML
+    )
+
+# ========== AUTO VIDEO HANDLER ==========
+
+@app.on_message((filters.video | filters.document | filters.animation) & filters.private)
+async def auto_video_handler(client: Client, message: Message):
+    """Automatically queue videos and process them"""
+    if not is_admin(message.from_user.id):
+        return
+    
+    user_id = message.from_user.id
+    
+    # Add to queue
+    video_queues[user_id].append({
+        'message': message,
+        'timestamp': time.time()
+    })
+    
+    queue_size = len(video_queues[user_id])
+    
+    # Show queue status
+    if queue_size == 1:
+        status = await message.reply(
+            f"<b>📥 Video queued (1)</b>\n"
+            f"<i>Send more videos or wait 3 seconds for auto-process...</i>",
+            parse_mode=ParseMode.HTML
+        )
+        
+        # Wait 3 seconds for more videos
+        await asyncio.sleep(3)
+        
+        # If queue still has videos and not processing, process them
+        if video_queues[user_id] and not processing_status.get(user_id, False):
+            await process_video_queue(user_id, message.chat.id)
+    else:
+        # Update status for additional videos
+        if queue_size % 10 == 0 or queue_size in [5, 10, 25, 50]:
+            await message.reply(
+                f"<b>📥 Videos in queue: {queue_size}</b>\n"
+                f"<i>Keep sending or bot will auto-process...</i>",
+                parse_mode=ParseMode.HTML
+            )
+
+# ========== BATCH RENAME (RANGE) ==========
+
+@app.on_message(filters.command("rename") & filters.private)
+async def rename_handler(client: Client, message: Message):
+    """Batch rename by message range"""
+    if not is_admin(message.from_user.id):
+        return
+    
+    await message.reply(
+        "<b>🔄 Batch Rename Mode</b>\n\n"
+        "1. Reply to FIRST message with <code>/startbatch</code>\n"
+        "2. Reply to LAST message with <code>/endbatch</code>\n\n"
+        "<i>Bot will process all videos between them!</i>",
         parse_mode=ParseMode.HTML
     )
 
 @app.on_message(filters.command("startbatch") & filters.private)
-async def start_batch_handler(client: Client, message: Message):
-    """Mark first message of batch"""
+async def startbatch_handler(client: Client, message: Message):
     if not is_admin(message.from_user.id):
         return
     
-    user_id = message.from_user.id
-    
-    if user_id not in user_rename_sessions:
-        return await message.reply("⚠️ First send /rename to start a session!")
-    
     if not message.reply_to_message:
-        return await message.reply("⚠️ Reply to the first message of the batch!")
+        return await message.reply("⚠️ Reply to first message!")
     
-    session = user_rename_sessions[user_id]
-    session['chat_id'] = message.chat.id
-    session['start_msg_id'] = message.reply_to_message.id
-    session['step'] = 'waiting_last'
+    user_id = message.from_user.id
+    user_rename_sessions[user_id] = {
+        'start_id': message.reply_to_message.id,
+        'chat_id': message.chat.id
+    }
     
     await message.reply(
-        f"<b>✅ First message marked (ID: {message.reply_to_message.id})</b>\n\n"
-        f"Now reply to the <b>LAST message</b> with <code>/endbatch</code>",
+        f"<b>✅ Start marked (ID: {message.reply_to_message.id})</b>\n"
+        f"Now reply to LAST message with <code>/endbatch</code>",
         parse_mode=ParseMode.HTML
     )
 
 @app.on_message(filters.command("endbatch") & filters.private)
-async def end_batch_handler(client: Client, message: Message):
-    """Mark last message and process batch"""
+async def endbatch_handler(client: Client, message: Message):
     if not is_admin(message.from_user.id):
         return
+    
+    if not message.reply_to_message:
+        return await message.reply("⚠️ Reply to last message!")
     
     user_id = message.from_user.id
     
     if user_id not in user_rename_sessions:
-        return await message.reply("⚠️ First send /rename to start a session!")
+        return await message.reply("⚠️ First use /startbatch!")
     
     session = user_rename_sessions[user_id]
-    
-    if session.get('step') != 'waiting_last':
-        return await message.reply("⚠️ First mark the start with /startbatch!")
-    
-    if not message.reply_to_message:
-        return await message.reply("⚠️ Reply to the last message of the batch!")
-    
-    session['end_msg_id'] = message.reply_to_message.id
-    
-    # Validate range
-    if session['end_msg_id'] < session['start_msg_id']:
-        return await message.reply("⚠️ End message must be after start message!")
-    
-    # Process batch
-    status_msg = await message.reply("<b>⏳ Processing batch...</b>", parse_mode=ParseMode.HTML)
-    
-    try:
-        await process_batch(client, user_id, session, status_msg)
-    except Exception as e:
-        await status_msg.edit(f"<b>❌ Error:</b> {str(e)}")
-    finally:
-        user_rename_sessions.pop(user_id, None)
-
-async def process_batch(client: Client, user_id: int, session: dict, status_msg: Message):
-    """Process the batch of messages"""
+    start_id = session['start_id']
+    end_id = message.reply_to_message.id
     chat_id = session['chat_id']
-    start_id = session['start_msg_id']
-    end_id = session['end_msg_id']
     
-    # Get user caption template
-    caption_template = user_captions.get(user_id, DEFAULT_CAPTION)
+    if end_id <= start_id:
+        return await message.reply("⚠️ End must be after start!")
     
-    # Collect all video messages
-    video_messages = []
+    if (end_id - start_id) > 10000:
+        return await message.reply("⚠️ Max 10000 messages allowed!")
     
-    await status_msg.edit_text(
-        f"<b>🔍 Scanning messages from {start_id} to {end_id}...</b>",
+    await message.reply(
+        f"<b>⏳ Processing messages {start_id} to {end_id}...</b>",
         parse_mode=ParseMode.HTML
     )
     
-    # Iterate through message range
-    current_id = start_id
-    batch_size = 0
+    # Collect messages
+    videos = []
+    caption_template = user_captions.get(user_id, DEFAULT_CAPTION)
     
-    while current_id <= end_id:
+    for msg_id in range(start_id, end_id + 1):
         try:
-            msg = await client.get_messages(chat_id, current_id)
-            
-            # Check if message has video
-            if msg and (msg.video or msg.document or msg.animation):
-                # Extract info from existing caption or filename
-                info = None
-                if msg.caption:
-                    info = extract_info_from_caption(msg.caption)
-                
-                # If no info from caption, try filename
-                if not info or info['anime_name'] == '':
-                    filename = ""
-                    if msg.video and msg.video.file_name:
-                        filename = msg.video.file_name
-                    elif msg.document and msg.document.file_name:
-                        filename = msg.document.file_name
-                    
+            msg = await client.get_messages(chat_id, msg_id)
+            if msg and (msg.video or msg.document):
+                info = extract_info_from_caption(msg.caption or "")
+                if not info['anime_name']:
+                    filename = msg.video.file_name if msg.video else msg.document.file_name
                     if filename:
                         info = extract_info_from_filename(filename)
                 
-                if not info:
-                    info = {'anime_name': 'Unknown', 'ep': 'N/A', 'season': 'S01', 'quality': '1080p'}
-                
-                video_messages.append({
+                videos.append({
                     'msg': msg,
                     'info': info,
-                    'quality_priority': get_quality_priority(info['quality']),
-                    'ep_num': int(info['ep']) if info['ep'].isdigit() else 999
+                    'ep_num': int(info['ep']) if str(info['ep']).isdigit() else 999,
+                    'quality_priority': get_quality_priority(info['quality'])
                 })
-                batch_size += 1
-                
-        except Exception as e:
-            pass  # Skip deleted/inaccessible messages
-        
-        current_id += 1
-        
-        # Update status every 50 messages
-        if (current_id - start_id) % 50 == 0:
-            await status_msg.edit_text(
-                f"<b>🔍 Scanning... ({current_id - start_id} messages checked, {batch_size} videos found)</b>",
-                parse_mode=ParseMode.HTML
-            )
-    
-    if not video_messages:
-        return await status_msg.edit("<b>❌ No video messages found in this range!</b>")
-    
-    # Sort by episode number, then by quality priority
-    video_messages.sort(key=lambda x: (x['ep_num'], x['quality_priority']))
-    
-    await status_msg.edit_text(
-        f"<b>✅ Found {len(video_messages)} videos</b>\n"
-        f"<b>⚡ Starting rename and send...</b>",
-        parse_mode=ParseMode.HTML
-    )
-    
-    # Process and send each video with new caption
-    success_count = 0
-    failed_count = 0
-    
-    for idx, item in enumerate(video_messages, 1):
-        try:
-            msg = item['msg']
-            info = item['info']
-            
-            # Generate new caption
-            new_caption = parse_caption_template(caption_template, info)
-            
-            # Copy message with new caption
-            if msg.video:
-                await client.send_video(
-                    chat_id=chat_id,
-                    video=msg.video.file_id,
-                    caption=new_caption,
-                    parse_mode=ParseMode.HTML,
-                    duration=msg.video.duration,
-                    width=msg.video.width,
-                    height=msg.video.height,
-                    thumb=msg.video.thumbs[0].file_id if msg.video.thumbs else None,
-                    supports_streaming=True
-                )
-            elif msg.document:
-                await client.send_document(
-                    chat_id=chat_id,
-                    document=msg.document.file_id,
-                    caption=new_caption,
-                    parse_mode=ParseMode.HTML,
-                    thumb=msg.document.thumbs[0].file_id if msg.document.thumbs else None
-                )
-            elif msg.animation:
-                await client.send_animation(
-                    chat_id=chat_id,
-                    animation=msg.animation.file_id,
-                    caption=new_caption,
-                    parse_mode=ParseMode.HTML
-                )
-            
-            success_count += 1
-            
-            # Update progress every 5 videos
-            if idx % 5 == 0 or idx == len(video_messages):
-                await status_msg.edit_text(
-                    f"<b>⏳ Progress: {idx}/{len(video_messages)}</b>\n"
-                    f"✅ Success: {success_count}\n"
-                    f"❌ Failed: {failed_count}",
-                    parse_mode=ParseMode.HTML
-                )
-            
-            # Small delay to avoid flood
-            await asyncio.sleep(0.5)
-            
-        except Exception as e:
-            failed_count += 1
+        except:
             continue
     
-    # Final status
-    await status_msg.edit_text(
-        f"<b>🎉 Batch Processing Complete!</b>\n\n"
-        f"📊 <b>Total:</b> {len(video_messages)}\n"
-        f"✅ <b>Success:</b> {success_count}\n"
-        f"❌ <b>Failed:</b> {failed_count}\n\n"
-        f"<i>Videos sorted by Episode → Quality (480p→720p→1080p→4K)</i>",
-        parse_mode=ParseMode.HTML
-    )
-
-# ========== SINGLE VIDEO HANDLER ==========
-
-@app.on_message((filters.video | filters.document | filters.animation) & filters.private)
-async def single_video_handler(client: Client, message: Message):
-    """Handle single video - rename caption and send back"""
-    if not is_admin(message.from_user.id):
-        return
+    if not videos:
+        return await message.reply("<b>❌ No videos found!</b>")
     
-    user_id = message.from_user.id
-    caption_template = user_captions.get(user_id, DEFAULT_CAPTION)
+    # Sort
+    videos.sort(key=lambda x: (x['ep_num'], x['quality_priority']))
     
-    # Extract info
-    info = None
-    if message.caption:
-        info = extract_info_from_caption(message.caption)
+    # Send
+    status = await message.reply(f"<b>⚡ Sending {len(videos)} videos...</b>")
     
-    # Try filename if no caption info
-    if not info or info['anime_name'] == '':
-        filename = ""
-        if message.video and message.video.file_name:
-            filename = message.video.file_name
-        elif message.document and message.document.file_name:
-            filename = message.document.file_name
-        
-        if filename:
-            info = extract_info_from_filename(filename)
+    for idx, item in enumerate(videos, 1):
+        try:
+            new_caption = parse_caption_template(caption_template, item['info'])
+            
+            if item['msg'].video:
+                await client.send_video(chat_id, item['msg'].video.file_id, caption=new_caption, parse_mode=ParseMode.HTML)
+            else:
+                await client.send_document(chat_id, item['msg'].document.file_id, caption=new_caption, parse_mode=ParseMode.HTML)
+            
+            if idx % 10 == 0:
+                await status.edit_text(f"<b>⏳ Sent {idx}/{len(videos)}...</b>")
+            
+            await asyncio.sleep(0.5)
+        except:
+            continue
     
-    if not info:
-        info = {'anime_name': 'Unknown', 'ep': 'N/A', 'season': 'S01', 'quality': '1080p'}
-    
-    # Generate new caption
-    new_caption = parse_caption_template(caption_template, info)
-    
-    # Send back with new caption
-    try:
-        if message.video:
-            await client.send_video(
-                chat_id=message.chat.id,
-                video=message.video.file_id,
-                caption=new_caption,
-                parse_mode=ParseMode.HTML,
-                duration=message.video.duration,
-                width=message.video.width,
-                height=message.video.height,
-                thumb=message.video.thumbs[0].file_id if message.video.thumbs else None,
-                supports_streaming=True,
-                reply_to_message_id=message.id
-            )
-        elif message.document:
-            await client.send_document(
-                chat_id=message.chat.id,
-                document=message.document.file_id,
-                caption=new_caption,
-                parse_mode=ParseMode.HTML,
-                thumb=message.document.thumbs[0].file_id if message.document.thumbs else None,
-                reply_to_message_id=message.id
-            )
-        elif message.animation:
-            await client.send_animation(
-                chat_id=message.chat.id,
-                animation=message.animation.file_id,
-                caption=new_caption,
-                parse_mode=ParseMode.HTML,
-                reply_to_message_id=message.id
-            )
-    except Exception as e:
-        await message.reply(f"<b>❌ Error:</b> {str(e)}", parse_mode=ParseMode.HTML)
+    await status.edit_text(f"<b>✅ Done! Sent {len(videos)} videos sorted!</b>")
+    del user_rename_sessions[user_id]
 
 # ========== MAIN ==========
 
