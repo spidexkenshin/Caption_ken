@@ -4,7 +4,7 @@ import asyncio
 import time
 from collections import defaultdict
 from pyrogram import Client, filters
-from pyrogram import Message
+from pyrofork import Message
 from pyrogram.enums import ParseMode
 
 # ========== CONFIGURATION ==========
