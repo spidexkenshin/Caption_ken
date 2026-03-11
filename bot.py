@@ -2,9 +2,10 @@ import os
 import re
 import asyncio
 import logging
-from pyrogram import Client, filters, idle
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import FloodWait, MessageNotModified
+from pyrofork import Client, filters, idle
+from pyrofork.types import Message
+from pyrofork.enums import ParseMode
+from pyrofork.errors import FloodWait
 
 # Enable logging
 logging.basicConfig(level=logging.INFO)
@@ -17,14 +18,14 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "your_bot_token")
 ADMIN_IDS = list(map(int, os.environ.get("ADMIN_IDS", "123456789").split()))
 
 # Default caption template with placeholders
-DEFAULT_CAPTION = """<b><blockquote>💫 {anime_name} 💫</blockquote>
+DEFAULT_CAPTION = """<b><blockquote expandable>💫 {anime_name} 💫</blockquote>
 
 ‣ Episode : {ep}
 ‣ Season : {season}
 ‣ Quality : {quality}
 ‣ Audio : Hindi Dub 🎙️ | Official
 ━━━━━━━━━━━━━━━━━━━━━
-<blockquote>🚀 For More Join
+<blockquote expandable>🚀 For More Join
 🔰 [@KENSHIN_ANIME]</blockquote>
 ━━━━━━━━━━━━━━━━━━━━━</b>"""
 
@@ -47,7 +48,8 @@ app = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    workers=100  # High workers for speed
+    workers=100,  # High workers for speed
+    parse_mode=ParseMode.HTML
 )
 
 # ============ HELPER FUNCTIONS ============
@@ -162,9 +164,10 @@ async def start_handler(client, message: Message):
     if not is_admin(message.from_user.id):
         return await message.reply("⛔ You are not authorized to use this bot.")
     
+    # Using quote in reply (pyrofork feature)
     await message.reply(
         "<blockquote>Jinda hu abhi..</blockquote>",
-        parse_mode="html"
+        quote=True
     )
 
 @app.on_message(filters.command("help") & filters.private)
@@ -194,10 +197,14 @@ async def help_handler(client, message: Message):
 <code>{season}</code> - Season number
 <code>{quality}</code> - Video quality
 
+<b>Quote Support:</b>
+Use <code>&lt;blockquote&gt;</code> for quotes
+Use <code>&lt;blockquote expandable&gt;</code> for collapsible quotes
+
 <b>Admin Only:</b>
-Only admins can use this bot.
-"""
-    await message.reply(help_text, parse_mode="html")
+Only admins can use this bot."""
+    
+    await message.reply(help_text, quote=True)
 
 @app.on_message(filters.command("setcaption") & filters.private)
 async def setcaption_handler(client, message: Message):
@@ -213,8 +220,11 @@ async def setcaption_handler(client, message: Message):
             "<code>{anime_name}</code> - Anime name\n"
             "<code>{ep}</code> - Episode number\n"
             "<code>{season}</code> - Season number\n"
-            "<code>{quality}</code> - Quality (480p, 720p, 1080p, etc.)",
-            parse_mode="html"
+            "<code>{quality}</code> - Quality (480p, 720p, 1080p, etc.)\n\n"
+            "<b>Quote tags:</b>\n"
+            "<code>&lt;blockquote&gt;</code> - Regular quote\n"
+            "<code>&lt;blockquote expandable&gt;</code> - Collapsible quote",
+            quote=True
         )
     
     if message.reply_to_message and message.reply_to_message.text:
@@ -223,10 +233,20 @@ async def setcaption_handler(client, message: Message):
         new_caption = message.text.split(None, 1)[1]
     
     user_captions[message.from_user.id] = new_caption
+    
+    # Preview with sample data
+    preview_info = {
+        'anime_name': 'Demon Slayer',
+        'ep': '05',
+        'season': '01',
+        'quality': '1080p'
+    }
+    preview = parse_caption(new_caption, preview_info)
+    
     await message.reply(
         f"<b>✅ Caption template set successfully!</b>\n\n"
-        f"<b>Preview:</b>\n{new_caption[:500]}...",
-        parse_mode="html"
+        f"<b>Preview:</b>\n{preview}",
+        quote=True
     )
 
 @app.on_message(filters.command("mycaption") & filters.private)
@@ -239,7 +259,7 @@ async def mycaption_handler(client, message: Message):
     await message.reply(
         f"<b>📝 Your Current Caption Template:</b>\n\n"
         f"<code>{caption}</code>",
-        parse_mode="html"
+        quote=True
     )
 
 @app.on_message(filters.command("resetcaption") & filters.private)
@@ -251,7 +271,7 @@ async def resetcaption_handler(client, message: Message):
     user_captions.pop(message.from_user.id, None)
     await message.reply(
         "<b>✅ Caption reset to default!</b>",
-        parse_mode="html"
+        quote=True
     )
 
 @app.on_message(filters.command("rename") & filters.private)
@@ -261,14 +281,14 @@ async def rename_handler(client, message: Message):
         return
     
     if not message.reply_to_message:
-        return await message.reply("⚠️ Please reply to a video message with /rename")
+        return await message.reply("⚠️ Please reply to a video message with /rename", quote=True)
     
     target_msg = message.reply_to_message
     
     if not target_msg.video and not target_msg.document:
-        return await message.reply("⚠️ Please reply to a video file.")
+        return await message.reply("⚠️ Please reply to a video file.", quote=True)
     
-    processing_msg = await message.reply("🔄 Processing...")
+    processing_msg = await message.reply("🔄 Processing...", quote=True)
     
     try:
         # Get caption template
@@ -282,18 +302,12 @@ async def rename_handler(client, message: Message):
         new_caption = parse_caption(template, info)
         
         # Copy message with new caption
-        if target_msg.video:
-            await target_msg.copy(
-                chat_id=message.chat.id,
-                caption=new_caption,
-                parse_mode="html"
-            )
-        else:
-            await target_msg.copy(
-                chat_id=message.chat.id,
-                caption=new_caption,
-                parse_mode="html"
-            )
+        await target_msg.copy(
+            chat_id=message.chat.id,
+            caption=new_caption,
+            parse_mode=ParseMode.HTML,
+            quote=True
+        )
         
         await processing_msg.edit("✅ Caption renamed successfully!")
         
@@ -311,7 +325,7 @@ async def batchrename_handler(client, message: Message):
         "<b>📦 Batch Rename Mode</b>\n\n"
         "Send me the <b>first message link</b> (from the chat) where you want to start.\n"
         "Format: <code>https://t.me/c/xxxx/123</code> or just message ID",
-        parse_mode="html"
+        quote=True
     )
     rename_sessions[message.from_user.id] = {"step": "waiting_first"}
 
@@ -350,10 +364,10 @@ async def batch_input_handler(client, message: Message):
             await message.reply(
                 "<b>✅ First message recorded.</b>\n\n"
                 "Now send me the <b>last message link</b> or message ID.",
-                parse_mode="html"
+                quote=True
             )
         except:
-            await message.reply("❌ Invalid format. Send a valid message link or ID.")
+            await message.reply("❌ Invalid format. Send a valid message link or ID.", quote=True)
     
     elif session["step"] == "waiting_last":
         try:
@@ -371,10 +385,10 @@ async def batch_input_handler(client, message: Message):
                 f"• From message: <code>{session['first_msg']}</code>\n"
                 f"• To message: <code>{session['last_msg']}</code>\n\n"
                 f"Send <code>/confirm</code> to start renaming or <code>/cancel</code> to abort.",
-                parse_mode="html"
+                quote=True
             )
         except:
-            await message.reply("❌ Invalid format. Send a valid message link or ID.")
+            await message.reply("❌ Invalid format. Send a valid message link or ID.", quote=True)
     
     elif session["step"] == "confirm" and message.text == "/confirm":
         await process_batch_rename(client, message, session)
@@ -382,7 +396,7 @@ async def batch_input_handler(client, message: Message):
     
     elif message.text == "/cancel":
         del rename_sessions[user_id]
-        await message.reply("❌ Batch rename cancelled.")
+        await message.reply("❌ Batch rename cancelled.", quote=True)
 
 @app.on_message(filters.command("confirm") & filters.private)
 async def confirm_handler(client, message: Message):
@@ -394,13 +408,13 @@ async def cancel_handler(client, message: Message):
     """Cancel batch rename"""
     pass  # Handled in batch_input_handler
 
-async def process_batch_rename(client, message, session):
+async def process_batch_rename(client, message: Message, session):
     """Process batch rename with sorting"""
     first_msg = session["first_msg"]
     last_msg = session["last_msg"]
     chat_id = session["chat_id"] or message.chat.id
     
-    status_msg = await message.reply("🔄 Fetching messages...")
+    status_msg = await message.reply("🔄 Fetching messages...", quote=True)
     
     try:
         # Collect all video messages
@@ -456,7 +470,7 @@ async def process_batch_rename(client, message, session):
                 await video_data['msg'].copy(
                     chat_id=message.chat.id,
                     caption=new_caption,
-                    parse_mode="html"
+                    parse_mode=ParseMode.HTML
                 )
                 
                 success_count += 1
@@ -477,7 +491,7 @@ async def process_batch_rename(client, message, session):
                 await video_data['msg'].copy(
                     chat_id=message.chat.id,
                     caption=new_caption,
-                    parse_mode="html"
+                    parse_mode=ParseMode.HTML
                 )
                 success_count += 1
             except Exception as e:
@@ -488,8 +502,7 @@ async def process_batch_rename(client, message, session):
             f"<b>✅ Batch Rename Complete!</b>\n\n"
             f"📊 Total videos: {len(videos)}\n"
             f"✅ Successfully sent: {success_count}\n"
-            f"❌ Failed: {len(videos) - success_count}",
-            parse_mode="html"
+            f"❌ Failed: {len(videos) - success_count}"
         )
         
     except Exception as e:
@@ -508,7 +521,7 @@ async def video_handler(client, message: Message):
     if message.text or message.caption:
         return
     
-    processing_msg = await message.reply("🔄 Processing video...")
+    processing_msg = await message.reply("🔄 Processing video...", quote=True)
     
     try:
         template = user_captions.get(message.from_user.id, DEFAULT_CAPTION)
@@ -519,7 +532,8 @@ async def video_handler(client, message: Message):
         await message.copy(
             chat_id=message.chat.id,
             caption=new_caption,
-            parse_mode="html"
+            parse_mode=ParseMode.HTML,
+            quote=True
         )
         
         await processing_msg.delete()
@@ -531,5 +545,5 @@ async def video_handler(client, message: Message):
 # ============ MAIN ============
 
 if __name__ == "__main__":
-    print("Starting Caption Changer Bot...")
+    print("Starting Caption Changer Bot with Pyrofork...")
     app.run()
