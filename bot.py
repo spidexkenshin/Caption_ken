@@ -2,7 +2,7 @@ import os
 import re
 import asyncio
 import logging
-from pyrofork import Client, filters, idle
+from pyrofork import Client, filters
 from pyrofork.types import Message
 from pyrofork.enums import ParseMode
 from pyrofork.errors import FloodWait
@@ -12,10 +12,27 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ============ CONFIGURATION ============
-API_ID = int(os.environ.get("API_ID", "12345"))
-API_HASH = os.environ.get("API_HASH", "your_api_hash")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "your_bot_token")
-ADMIN_IDS = list(map(int, os.environ.get("ADMIN_IDS", "123456789").split()))
+API_ID = int(os.environ.get("API_ID", "0"))
+API_HASH = os.environ.get("API_HASH", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+
+# Better ADMIN_IDS parsing - handles single ID, multiple IDs, with/without commas
+admin_ids_str = os.environ.get("ADMIN_IDS", "")
+ADMIN_IDS = []
+if admin_ids_str:
+    # Remove any quotes that might be in the env variable
+    admin_ids_str = admin_ids_str.replace('"', '').replace("'", "")
+    # Split by comma or space and convert to int
+    for id_str in admin_ids_str.replace(",", " ").split():
+        try:
+            ADMIN_IDS.append(int(id_str.strip()))
+        except ValueError:
+            logger.warning(f"Could not parse admin ID: {id_str}")
+
+logger.info(f"=" * 50)
+logger.info(f"ADMIN_IDS loaded: {ADMIN_IDS}")
+logger.info(f"Raw ADMIN_IDS env: {os.environ.get('ADMIN_IDS', 'NOT SET')}")
+logger.info(f"=" * 50)
 
 # Default caption template with placeholders
 DEFAULT_CAPTION = """<b><blockquote expandable>💫 {anime_name} 💫</blockquote>
@@ -48,7 +65,7 @@ app = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    workers=100,  # High workers for speed
+    workers=100,
     parse_mode=ParseMode.HTML
 )
 
@@ -114,12 +131,13 @@ def extract_info(text):
                 info['quality'] = '480p'
             break
     
-    # Extract Anime Name - look for patterns like "Anime: Name" or bold text
+    # Extract Anime Name
     anime_patterns = [
         r'[Aa]nime\s*[-:]?\s*([^\n]+)',
         r'🎬\s*([^\n]+)',
         r'📟\s*([^\n]+)',
-        r'💫\s*([^\n]+)'
+        r'💫\s*([^\n]+)',
+        r'🎥\s*([^\n]+)'
     ]
     for pattern in anime_patterns:
         match = re.search(pattern, text)
@@ -127,7 +145,7 @@ def extract_info(text):
             info['anime_name'] = match.group(1).strip()[:50]
             break
     
-    # If no anime name found, try to extract from first line
+    # If no anime name found, try first meaningful line
     if info['anime_name'] == 'Unknown Anime':
         lines = text.strip().split('\n')
         for line in lines:
@@ -161,10 +179,21 @@ def is_admin(user_id):
 @app.on_message(filters.command("start") & filters.private)
 async def start_handler(client, message: Message):
     """Start command handler"""
-    if not is_admin(message.from_user.id):
-        return await message.reply("⛔ You are not authorized to use this bot.")
+    user_id = message.from_user.id
     
-    # Using quote in reply (pyrofork feature)
+    # Debug info
+    logger.info(f"Start command from user: {user_id}")
+    logger.info(f"ADMIN_IDS list: {ADMIN_IDS}")
+    logger.info(f"Is admin check: {user_id in ADMIN_IDS}")
+    
+    if not is_admin(user_id):
+        return await message.reply(
+            f"⛔ You are not authorized to use this bot.\n\n"
+            f"Your ID: <code>{user_id}</code>\n"
+            f"Admin IDs: <code>{ADMIN_IDS}</code>",
+            quote=True
+        )
+    
     await message.reply(
         "<blockquote>Jinda hu abhi..</blockquote>",
         quote=True
@@ -174,7 +203,7 @@ async def start_handler(client, message: Message):
 async def help_handler(client, message: Message):
     """Help command handler"""
     if not is_admin(message.from_user.id):
-        return
+        return await message.reply(f"Your ID: <code>{message.from_user.id}</code>", quote=True)
     
     help_text = """<b>🤖 Caption Changer Bot Commands</b>
 
@@ -197,10 +226,6 @@ async def help_handler(client, message: Message):
 <code>{season}</code> - Season number
 <code>{quality}</code> - Video quality
 
-<b>Quote Support:</b>
-Use <code>&lt;blockquote&gt;</code> for quotes
-Use <code>&lt;blockquote expandable&gt;</code> for collapsible quotes
-
 <b>Admin Only:</b>
 Only admins can use this bot."""
     
@@ -210,7 +235,7 @@ Only admins can use this bot."""
 async def setcaption_handler(client, message: Message):
     """Set custom caption template"""
     if not is_admin(message.from_user.id):
-        return
+        return await message.reply("⛔ Not authorized.", quote=True)
     
     if len(message.command) < 2 and not message.reply_to_message:
         return await message.reply(
@@ -220,10 +245,7 @@ async def setcaption_handler(client, message: Message):
             "<code>{anime_name}</code> - Anime name\n"
             "<code>{ep}</code> - Episode number\n"
             "<code>{season}</code> - Season number\n"
-            "<code>{quality}</code> - Quality (480p, 720p, 1080p, etc.)\n\n"
-            "<b>Quote tags:</b>\n"
-            "<code>&lt;blockquote&gt;</code> - Regular quote\n"
-            "<code>&lt;blockquote expandable&gt;</code> - Collapsible quote",
+            "<code>{quality}</code> - Quality",
             quote=True
         )
     
@@ -234,7 +256,6 @@ async def setcaption_handler(client, message: Message):
     
     user_captions[message.from_user.id] = new_caption
     
-    # Preview with sample data
     preview_info = {
         'anime_name': 'Demon Slayer',
         'ep': '05',
@@ -244,7 +265,7 @@ async def setcaption_handler(client, message: Message):
     preview = parse_caption(new_caption, preview_info)
     
     await message.reply(
-        f"<b>✅ Caption template set successfully!</b>\n\n"
+        f"<b>✅ Caption template set!</b>\n\n"
         f"<b>Preview:</b>\n{preview}",
         quote=True
     )
@@ -257,7 +278,7 @@ async def mycaption_handler(client, message: Message):
     
     caption = user_captions.get(message.from_user.id, DEFAULT_CAPTION)
     await message.reply(
-        f"<b>📝 Your Current Caption Template:</b>\n\n"
+        f"<b>📝 Your Caption Template:</b>\n\n"
         f"<code>{caption}</code>",
         quote=True
     )
@@ -269,10 +290,7 @@ async def resetcaption_handler(client, message: Message):
         return
     
     user_captions.pop(message.from_user.id, None)
-    await message.reply(
-        "<b>✅ Caption reset to default!</b>",
-        quote=True
-    )
+    await message.reply("<b>✅ Caption reset to default!</b>", quote=True)
 
 @app.on_message(filters.command("rename") & filters.private)
 async def rename_handler(client, message: Message):
@@ -281,32 +299,25 @@ async def rename_handler(client, message: Message):
         return
     
     if not message.reply_to_message:
-        return await message.reply("⚠️ Please reply to a video message with /rename", quote=True)
+        return await message.reply("⚠️ Reply to a video with /rename", quote=True)
     
     target_msg = message.reply_to_message
     
     if not target_msg.video and not target_msg.document:
-        return await message.reply("⚠️ Please reply to a video file.", quote=True)
+        return await message.reply("⚠️ Reply to a video file.", quote=True)
     
     processing_msg = await message.reply("🔄 Processing...", quote=True)
     
     try:
-        # Get caption template
         template = user_captions.get(message.from_user.id, DEFAULT_CAPTION)
-        
-        # Extract info from original caption
-        original_caption = target_msg.caption or target_msg.text or ""
+        original_caption = target_msg.caption or ""
         info = extract_info(original_caption)
-        
-        # Generate new caption
         new_caption = parse_caption(template, info)
         
-        # Copy message with new caption
         await target_msg.copy(
             chat_id=message.chat.id,
             caption=new_caption,
-            parse_mode=ParseMode.HTML,
-            quote=True
+            parse_mode=ParseMode.HTML
         )
         
         await processing_msg.edit("✅ Caption renamed successfully!")
@@ -323,8 +334,8 @@ async def batchrename_handler(client, message: Message):
     
     await message.reply(
         "<b>📦 Batch Rename Mode</b>\n\n"
-        "Send me the <b>first message link</b> (from the chat) where you want to start.\n"
-        "Format: <code>https://t.me/c/xxxx/123</code> or just message ID",
+        "Send the <b>first message link</b> to start.\n"
+        "Format: <code>https://t.me/c/xxxx/123</code>",
         quote=True
     )
     rename_sessions[message.from_user.id] = {"step": "waiting_first"}
@@ -342,20 +353,18 @@ async def batch_input_handler(client, message: Message):
     session = rename_sessions[user_id]
     
     if session["step"] == "waiting_first":
-        # Parse first message link or ID
         try:
             if "t.me" in message.text:
-                # Extract from link
                 parts = message.text.strip().split('/')
                 msg_id = int(parts[-1])
-                chat_id = parts[-2] if parts[-2].startswith('-') or parts[-2].isdigit() else None
-                if chat_id and chat_id.startswith('c/'):
+                chat_id = parts[-2]
+                if chat_id.startswith('c/'):
                     chat_id = int(f"-100{chat_id[2:]}")
-                elif chat_id:
+                else:
                     chat_id = int(chat_id) if chat_id.lstrip('-').isdigit() else chat_id
             else:
                 msg_id = int(message.text.strip())
-                chat_id = None
+                chat_id = message.chat.id
             
             session["first_msg"] = msg_id
             session["chat_id"] = chat_id
@@ -363,11 +372,11 @@ async def batch_input_handler(client, message: Message):
             
             await message.reply(
                 "<b>✅ First message recorded.</b>\n\n"
-                "Now send me the <b>last message link</b> or message ID.",
+                "Now send the <b>last message link</b> or ID.",
                 quote=True
             )
-        except:
-            await message.reply("❌ Invalid format. Send a valid message link or ID.", quote=True)
+        except Exception as e:
+            await message.reply(f"❌ Invalid format: {e}", quote=True)
     
     elif session["step"] == "waiting_last":
         try:
@@ -382,13 +391,13 @@ async def batch_input_handler(client, message: Message):
             
             await message.reply(
                 f"<b>📊 Batch Summary:</b>\n"
-                f"• From message: <code>{session['first_msg']}</code>\n"
-                f"• To message: <code>{session['last_msg']}</code>\n\n"
-                f"Send <code>/confirm</code> to start renaming or <code>/cancel</code> to abort.",
+                f"• From: <code>{session['first_msg']}</code>\n"
+                f"• To: <code>{session['last_msg']}</code>\n\n"
+                f"Send <code>/confirm</code> to start or <code>/cancel</code> to abort.",
                 quote=True
             )
         except:
-            await message.reply("❌ Invalid format. Send a valid message link or ID.", quote=True)
+            await message.reply("❌ Invalid format.", quote=True)
     
     elif session["step"] == "confirm" and message.text == "/confirm":
         await process_batch_rename(client, message, session)
@@ -398,26 +407,15 @@ async def batch_input_handler(client, message: Message):
         del rename_sessions[user_id]
         await message.reply("❌ Batch rename cancelled.", quote=True)
 
-@app.on_message(filters.command("confirm") & filters.private)
-async def confirm_handler(client, message: Message):
-    """Confirm batch rename"""
-    pass  # Handled in batch_input_handler
-
-@app.on_message(filters.command("cancel") & filters.private)
-async def cancel_handler(client, message: Message):
-    """Cancel batch rename"""
-    pass  # Handled in batch_input_handler
-
 async def process_batch_rename(client, message: Message, session):
     """Process batch rename with sorting"""
     first_msg = session["first_msg"]
     last_msg = session["last_msg"]
-    chat_id = session["chat_id"] or message.chat.id
+    chat_id = session["chat_id"]
     
     status_msg = await message.reply("🔄 Fetching messages...", quote=True)
     
     try:
-        # Collect all video messages
         videos = []
         current = first_msg
         
@@ -425,7 +423,6 @@ async def process_batch_rename(client, message: Message, session):
             try:
                 msg = await client.get_messages(chat_id, current)
                 if msg and (msg.video or msg.document):
-                    # Extract info for sorting
                     caption = msg.caption or ""
                     info = extract_info(caption)
                     quality_priority = get_quality_priority(info.get('quality', '1080p'))
@@ -439,9 +436,8 @@ async def process_batch_rename(client, message: Message, session):
                 
                 current += 1
                 
-                # Update status every 10 messages
                 if (current - first_msg) % 10 == 0:
-                    await status_msg.edit(f"🔄 Fetched {len(videos)} videos so far...")
+                    await status_msg.edit(f"🔄 Fetched {len(videos)} videos...")
                     
             except FloodWait as e:
                 await asyncio.sleep(e.value)
@@ -450,17 +446,14 @@ async def process_batch_rename(client, message: Message, session):
                 current += 1
         
         if not videos:
-            return await status_msg.edit("❌ No videos found in the specified range.")
+            return await status_msg.edit("❌ No videos found.")
         
-        # Sort videos: First by Episode number, then by Quality priority
         videos.sort(key=lambda x: (x['ep_num'], x['quality_priority']))
         
-        await status_msg.edit(f"✅ Found {len(videos)} videos. Starting to send in sorted order...")
+        await status_msg.edit(f"✅ Found {len(videos)} videos. Sending...")
         
-        # Get caption template
         template = user_captions.get(message.from_user.id, DEFAULT_CAPTION)
         
-        # Send videos in sorted order
         success_count = 0
         for idx, video_data in enumerate(videos, 1):
             try:
@@ -475,19 +468,13 @@ async def process_batch_rename(client, message: Message, session):
                 
                 success_count += 1
                 
-                # Update progress every 5 videos
                 if idx % 5 == 0:
-                    await status_msg.edit(
-                        f"📤 Progress: {idx}/{len(videos)} videos sent...\n"
-                        f"✅ Success: {success_count}"
-                    )
+                    await status_msg.edit(f"📤 Progress: {idx}/{len(videos)} sent...")
                 
-                # Small delay to avoid flood
                 await asyncio.sleep(0.5)
                 
             except FloodWait as e:
                 await asyncio.sleep(e.value)
-                # Retry
                 await video_data['msg'].copy(
                     chat_id=message.chat.id,
                     caption=new_caption,
@@ -495,55 +482,23 @@ async def process_batch_rename(client, message: Message, session):
                 )
                 success_count += 1
             except Exception as e:
-                logger.error(f"Error sending video: {e}")
+                logger.error(f"Error: {e}")
                 continue
         
         await status_msg.edit(
-            f"<b>✅ Batch Rename Complete!</b>\n\n"
-            f"📊 Total videos: {len(videos)}\n"
-            f"✅ Successfully sent: {success_count}\n"
+            f"<b>✅ Complete!</b>\n\n"
+            f"📊 Total: {len(videos)}\n"
+            f"✅ Sent: {success_count}\n"
             f"❌ Failed: {len(videos) - success_count}"
         )
         
     except Exception as e:
-        logger.error(f"Batch rename error: {e}")
-        await status_msg.edit(f"❌ Error during batch rename: {str(e)}")
-
-# ============ VIDEO HANDLER ============
-
-@app.on_message((filters.video | filters.document) & filters.private)
-async def video_handler(client, message: Message):
-    """Auto-process videos sent to bot"""
-    if not is_admin(message.from_user.id):
-        return
-    
-    # Only auto-process if it's a direct video without command
-    if message.text or message.caption:
-        return
-    
-    processing_msg = await message.reply("🔄 Processing video...", quote=True)
-    
-    try:
-        template = user_captions.get(message.from_user.id, DEFAULT_CAPTION)
-        original_caption = message.caption or ""
-        info = extract_info(original_caption)
-        new_caption = parse_caption(template, info)
-        
-        await message.copy(
-            chat_id=message.chat.id,
-            caption=new_caption,
-            parse_mode=ParseMode.HTML,
-            quote=True
-        )
-        
-        await processing_msg.delete()
-        
-    except Exception as e:
-        logger.error(f"Error processing video: {e}")
-        await processing_msg.edit(f"❌ Error: {str(e)}")
+        logger.error(f"Batch error: {e}")
+        await status_msg.edit(f"❌ Error: {str(e)}")
 
 # ============ MAIN ============
 
 if __name__ == "__main__":
-    print("Starting Caption Changer Bot with Pyrofork...")
+    print("Starting Caption Changer Bot...")
+    print(f"Admin IDs: {ADMIN_IDS}")
     app.run()
